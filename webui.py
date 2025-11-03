@@ -708,6 +708,209 @@ def run_flashvsr_batch(
     return last_output_path, status_message
 
 
+def get_video_dimensions(video_path):
+    """Get video dimensions quickly. Returns (width, height) or (0, 0) on error."""
+    try:
+        if not video_path or not os.path.exists(video_path):
+            return 0, 0
+        reader = imageio.get_reader(video_path)
+        meta = reader.get_meta_data()
+        size = meta.get('size', (0, 0))
+        width, height = int(size[0]), int(size[1]) if isinstance(size, tuple) else (0, 0)
+        reader.close()
+        return width, height
+    except:
+        return 0, 0
+
+def analyze_input_video(video_path):
+    """Analyzes video and returns compact HTML display for FlashVSR tab."""
+    if not video_path:
+        return '<div style="padding: 12px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 6px; color: #856404;">⚠️ No video provided</div>', 0, 0
+    
+    try:
+        resolved_path = str(Path(video_path).resolve())
+        
+        # Get file size
+        file_size_display = "N/A"
+        if os.path.exists(resolved_path):
+            size_bytes = os.path.getsize(resolved_path)
+            if size_bytes < 1024**2:
+                file_size_display = f"{size_bytes/1024:.1f} KB"
+            elif size_bytes < 1024**3:
+                file_size_display = f"{size_bytes/1024**2:.1f} MB"
+            else:
+                file_size_display = f"{size_bytes/1024**3:.2f} GB"
+        
+        # Try imageio for quick analysis
+        reader = imageio.get_reader(resolved_path)
+        meta = reader.get_meta_data()
+        
+        # Extract info
+        duration = meta.get('duration', 0)
+        fps = meta.get('fps', 30)
+        size = meta.get('size', (0, 0))
+        width, height = int(size[0]), int(size[1]) if isinstance(size, tuple) else (0, 0)
+        
+        # Frame count
+        nframes = meta.get('nframes')
+        if nframes and nframes != float('inf'):
+            frame_count = int(nframes)
+        elif duration and fps:
+            frame_count = int(duration * fps)
+        else:
+            frame_count = 0
+        
+        reader.close()
+        
+        # Build compact HTML display
+        html = f'''
+        <div style="padding: 16px; background: linear-gradient(135deg, #667eea15 0%, #764ba215 100%); border: 1px solid #667eea40; border-radius: 8px; font-family: 'Segoe UI', sans-serif;">
+            <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 8px;">
+                <div style="background: rgba(212, 237, 218, 0.15); padding: 10px; border-radius: 6px; border-left: 3px solid #667eea;">
+                    <div style="font-size: 0.75em; color: #999; margin-bottom: 4px;">RESOLUTION</div>
+                    <div style="font-size: 1.1em; font-weight: 600; color: #ddd;">{width}×{height}</div>
+                </div>
+                <div style="background: rgba(212, 237, 218, 0.15); padding: 10px; border-radius: 6px; border-left: 3px solid #764ba2;">
+                    <div style="font-size: 0.75em; color: #999; margin-bottom: 4px;">FRAMES</div>
+                    <div style="font-size: 1.1em; font-weight: 600; color: #ddd;">{frame_count}</div>
+                </div>
+                <div style="background: rgba(212, 237, 218, 0.15); padding: 10px; border-radius: 6px; border-left: 3px solid #667eea;">
+                    <div style="font-size: 0.75em; color: #999; margin-bottom: 4px;">DURATION</div>
+                    <div style="font-size: 1.1em; font-weight: 600; color: #ddd;">{duration:.2f}s @ {fps:.1f} FPS</div>
+                </div>
+                <div style="background: rgba(212, 237, 218, 0.15); padding: 10px; border-radius: 6px; border-left: 3px solid #764ba2;">
+                    <div style="font-size: 0.75em; color: #999; margin-bottom: 4px;">FILE SIZE</div>
+                    <div style="font-size: 1.1em; font-weight: 600; color: #ddd;">{file_size_display}</div>
+                </div>
+            </div>
+            <div style="font-size: 0.8em; color: #999; text-align: center; margin-top: 8px;">
+                💡 Tip: This FlashVSR implementation works better with lower-resolution input (e.g. 540p)
+            </div>
+        </div>
+        '''
+        return html, width, height
+        
+    except Exception as e:
+        return f'<div style="padding: 12px; background: #f8d7da; border: 1px solid #f5c6cb; border-radius: 6px; color: #721c24;">❌ Error analyzing video: {str(e)}</div>', 0, 0
+
+def calculate_resize_dimensions(current_width, current_height, max_width):
+    """
+    Calculate new dimensions for resize, maintaining aspect ratio.
+    Never upsizes - only downsizes if needed.
+    Returns (new_width, new_height, will_resize)
+    """
+    if current_width <= 0 or current_height <= 0:
+        return current_width, current_height, False
+    
+    # Never upsize
+    if current_width <= max_width:
+        return current_width, current_height, False
+    
+    # Calculate new dimensions maintaining aspect ratio
+    aspect_ratio = current_height / current_width
+    new_width = max_width
+    new_height = int(max_width * aspect_ratio)
+    
+    # Ensure even dimensions (required for video encoding)
+    new_width = new_width if new_width % 2 == 0 else new_width - 1
+    new_height = new_height if new_height % 2 == 0 else new_height - 1
+    
+    return new_width, new_height, True
+
+def preview_resize(video_path, max_width):
+    """Generate preview text showing what resize will do."""
+    if not video_path:
+        return '<div style="padding: 8px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; color: #6c757d; font-size: 0.9em; text-align: center;">No video loaded</div>'
+    
+    current_width, current_height = get_video_dimensions(video_path)
+    if current_width == 0:
+        return '<div style="padding: 8px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; color: #856404; font-size: 0.9em; text-align: center;">⚠️ Could not read video dimensions</div>'
+    
+    new_width, new_height, will_resize = calculate_resize_dimensions(current_width, current_height, max_width)
+    
+    if will_resize:
+        reduction = ((current_width * current_height - new_width * new_height) / (current_width * current_height)) * 100
+        return f'<div style="padding: 8px; background: #d4edda; border: 1px solid #c3e6cb; border-radius: 4px; color: #155724; font-size: 0.9em; text-align: center;">{current_width}×{current_height} → {new_width}×{new_height} ({reduction:.0f}% reduction) ✓</div>'
+    else:
+        return f'<div style="padding: 8px; background: #d1ecf1; border: 1px solid #bee5eb; border-radius: 4px; color: #0c5460; font-size: 0.9em; text-align: center;">{current_width}×{current_height} (no resize needed) ✓</div>'
+
+def resize_input_video(video_path, max_width, progress=gr.Progress()):
+    """
+    Resizes video for FlashVSR preprocessing using FFmpeg.
+    Never upsizes - only downsizes if needed.
+    Returns path to resized video (or original if no resize needed).
+    """
+    if not video_path or not os.path.exists(video_path):
+        log("No video provided for resize", message_type="warning")
+        return video_path
+    
+    current_width, current_height = get_video_dimensions(video_path)
+    new_width, new_height, will_resize = calculate_resize_dimensions(current_width, current_height, max_width)
+    
+    if not will_resize:
+        log(f"Video is already {current_width}×{current_height}, no resize needed", message_type="info")
+        return video_path
+    
+    if not is_ffmpeg_available():
+        log("FFmpeg not available, cannot resize video", message_type="error")
+        return video_path
+    
+    try:
+        log(f"Resizing video from {current_width}×{current_height} to {new_width}×{new_height}...", message_type="info")
+        progress(0.1, desc="Resizing input video...")
+        
+        # Generate output path in temp directory
+        input_basename = os.path.splitext(os.path.basename(video_path))[0]
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        output_filename = f"{input_basename}_resized_{new_width}x{new_height}_{timestamp}.mp4"
+        output_path = os.path.join(TEMP_DIR, output_filename)
+        
+        # Use FFmpeg to resize with high quality settings
+        progress(0.3, desc="Running FFmpeg resize...")
+        
+        # Build FFmpeg command - use map to handle audio gracefully
+        ffmpeg_cmd = [
+            'ffmpeg', '-y', '-i', video_path,
+            '-vf', f'scale={new_width}:{new_height}:flags=lanczos',
+            '-c:v', 'libx264',
+            '-preset', 'medium',
+            '-crf', '18',
+            '-pix_fmt', 'yuv420p',
+            '-map', '0:v:0',  # Map video stream
+            '-map', '0:a:0?',  # Map audio stream if it exists (? makes it optional)
+            '-c:a', 'aac',
+            '-b:a', '192k',
+            output_path
+        ]
+        
+        # Run FFmpeg and capture output
+        result = subprocess.run(
+            ffmpeg_cmd,
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        
+        progress(1.0, desc="Resize complete!")
+        log(f"Video resized successfully: {output_path}", message_type="finish")
+        return output_path
+        
+    except subprocess.CalledProcessError as e:
+        log(f"FFmpeg error during resize:", message_type="error")
+        log(f"Command: {' '.join(e.cmd)}", message_type="error")
+        if e.stderr:
+            # Print stderr line by line for better readability
+            log("FFmpeg stderr output:", message_type="error")
+            for line in e.stderr.split('\n'):
+                if line.strip():
+                    log(f"  {line}", message_type="error")
+        return video_path
+    except Exception as e:
+        log(f"Error resizing video: {e}", message_type="error")
+        import traceback
+        log(traceback.format_exc(), message_type="error")
+        return video_path
+
 def open_folder(folder_path):
     try:
         if sys.platform == "win32":
@@ -851,6 +1054,39 @@ def create_ui():
                                     height="320px",                            
                                 )
                                 batch_run_button = gr.Button("Start Batch Processing", variant="primary", size="sm")
+                        
+                        # Video Pre-Processing Accordion
+                        with gr.Accordion("📊 Video Pre-Processing", open=False):
+                            video_analysis_html = gr.HTML(
+                                value='<div style="padding: 12px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px; color: #6c757d; text-align: center;">Upload video to see analysis</div>'
+                            )
+                            with gr.Row():
+                                analyze_video_btn = gr.Button("🔄 Re-analyze", size="sm", variant="secondary", scale=1)
+                            
+                            gr.Markdown("---")
+                            
+                            # Resize controls
+                            gr.Markdown("**Resize & Re-encode Input Video**")
+                            
+                            resize_max_width_slider = gr.Slider(
+                                minimum=256,
+                                maximum=2048,
+                                step=64,
+                                value=768,
+                                label="Target Width (pixels)",
+                                info="Adjust slider to resize video. Maximum is set to your video's current width.",
+                                interactive=True
+                            )
+                            
+                            resize_preview_html = gr.HTML(
+                                value='<div style="padding: 8px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; color: #6c757d; font-size: 0.9em; text-align: center;">Upload and analyze video to enable resize</div>'
+                            )
+                            
+                            resize_button = gr.Button("Apply Resize", size="sm", variant="primary")
+                            
+                            # Hidden state to store current video dimensions
+                            current_video_width = gr.State(0)
+                            current_video_height = gr.State(0)
 
                                 
                         with gr.Group():
@@ -1232,6 +1468,81 @@ def create_ui():
             show_progress="hidden"
         )
 
+        # Analyze video button handler - updates slider max and preview
+        def handle_analyze(video_path):
+            html, width, height = analyze_input_video(video_path)
+            
+            # Update slider maximum to video width (or keep 2048 if video is larger)
+            slider_max = min(width, 2048) if width > 0 else 2048
+            slider_value = min(768, slider_max)  # Default to 768 or lower if video is smaller
+            
+            # Update slider
+            slider_update = gr.update(
+                maximum=slider_max,
+                value=slider_value,
+                interactive=(width > 0)
+            )
+            
+            # Update preview
+            preview = preview_resize(video_path, slider_value)
+            
+            return html, width, height, slider_update, preview
+        
+        analyze_video_btn.click(
+            fn=handle_analyze,
+            inputs=[input_video],
+            outputs=[video_analysis_html, current_video_width, current_video_height, resize_max_width_slider, resize_preview_html]
+        )
+        
+        # Update preview when slider changes
+        def update_resize_preview(video_path, max_width):
+            return preview_resize(video_path, max_width)
+        
+        resize_max_width_slider.change(
+            fn=update_resize_preview,
+            inputs=[input_video, resize_max_width_slider],
+            outputs=[resize_preview_html]
+        )
+        
+        # When video changes, auto-analyze it
+        def handle_video_change(video_path):
+            if not video_path:
+                return (
+                    '<div style="padding: 8px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; color: #6c757d; font-size: 0.9em; text-align: center;">Upload video to see analysis</div>',
+                    0,
+                    0,
+                    gr.update(maximum=2048, value=768, interactive=False),
+                    '<div style="padding: 8px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; color: #6c757d; font-size: 0.9em; text-align: center;">Upload video to enable resize</div>'
+                )
+            # Auto-analyze the video
+            return handle_analyze(video_path)
+        
+        input_video.change(
+            fn=handle_video_change,
+            inputs=[input_video],
+            outputs=[video_analysis_html, current_video_width, current_video_height, resize_max_width_slider, resize_preview_html]
+        )
+        
+        # Apply resize button handler
+        def handle_resize_and_update(video_path, max_width, progress=gr.Progress()):
+            resized_path = resize_input_video(video_path, max_width, progress)
+            
+            # After resize, analyze the new video to update slider
+            html, width, height = analyze_input_video(resized_path)
+            slider_max = min(width, 2048) if width > 0 else 2048
+            slider_value = min(max_width, slider_max)
+            
+            slider_update = gr.update(maximum=slider_max, value=slider_value)
+            preview = preview_resize(resized_path, slider_value)
+            
+            return resized_path, html, slider_update, preview
+        
+        resize_button.click(
+            fn=handle_resize_and_update,
+            inputs=[input_video, resize_max_width_slider],
+            outputs=[input_video, video_analysis_html, resize_max_width_slider, resize_preview_html]
+        )
+        
         run_button.click(
             fn=run_flashvsr_single,
             inputs=[
