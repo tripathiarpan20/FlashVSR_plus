@@ -336,6 +336,15 @@ class ToolboxProcessor:
     def _copy_to_permanent_storage(self, temp_path, final_path):
         """Copies a temp file to permanent storage and cleans up the source temp file."""
         try:
+            # Check if source and destination are the same file
+            temp_path_resolved = Path(temp_path).resolve()
+            final_path_resolved = Path(final_path).resolve()
+            
+            if temp_path_resolved == final_path_resolved:
+                # File is already in the correct location, no need to copy
+                print(f"File already in permanent storage: {final_path}")
+                return str(final_path)
+            
             shutil.copy(temp_path, final_path)
             os.remove(temp_path)
             return str(final_path)

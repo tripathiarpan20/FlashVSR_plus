@@ -377,6 +377,59 @@ def stitch_video_tiles(
                 log(f"Could not remove temporary file '{path}': {e}", message_type='warning')
 
 
+def create_side_by_side_comparison(input_path, output_path, comparison_output_path):
+    """
+    Creates a side-by-side comparison video with input on left and output on right.
+    Uses FFmpeg's hstack filter for horizontal stacking.
+    Scales both videos to match the output video's height.
+    """
+    if not is_ffmpeg_available():
+        log("[FlashVSR] FFmpeg not found. Cannot create side-by-side comparison.", message_type='warning')
+        return None
+    
+    try:
+        log("[FlashVSR] Creating side-by-side comparison...", message_type='info')
+        
+        # Build FFmpeg command for side-by-side comparison
+        # Use scale2ref to scale input to match output's height, then hstack
+        # Force even dimensions for H.264 compatibility using -2 (auto-calculate to even number)
+        # [0:v] is input (to be scaled), [1:v] is output (reference - the larger one)
+        ffmpeg_cmd = [
+            'ffmpeg', '-y',
+            '-i', input_path,
+            '-i', output_path,
+            '-filter_complex',
+            '[0:v][1:v]scale2ref=-2:ih[left][right];[left][right]hstack=inputs=2[v]',
+            '-map', '[v]',
+            '-map', '1:a?',  # Use audio from output video if available
+            '-c:v', 'libx264',
+            '-preset', 'medium',
+            '-crf', '18',
+            '-pix_fmt', 'yuv420p',
+            '-c:a', 'aac',
+            '-b:a', '192k',
+            comparison_output_path
+        ]
+        
+        result = subprocess.run(
+            ffmpeg_cmd,
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        
+        log(f"[FlashVSR] Side-by-side comparison created: {comparison_output_path}", message_type='finish')
+        return comparison_output_path
+        
+    except subprocess.CalledProcessError as e:
+        log(f"[FlashVSR] Error creating side-by-side comparison: {e}", message_type='error')
+        if e.stderr:
+            log(f"FFmpeg stderr: {e.stderr}", message_type='error')
+        return None
+    except Exception as e:
+        log(f"[FlashVSR] Unexpected error creating comparison: {e}", message_type='error')
+        return None
+
 def merge_video_with_audio(video_only_path, audio_source_path, output_path):
     """
     Merges the video from video_only_path with audio from audio_source_path into output_path.
@@ -495,6 +548,7 @@ def run_flashvsr_single(
     kv_ratio,
     local_range,
     autosave,
+    create_comparison=False,
     progress=gr.Progress(track_tqdm=True)
 ):
     if not input_path:
@@ -695,7 +749,21 @@ def run_flashvsr_single(
     else:
         shutil.move(temp_video_path, temp_output_path)
     
-    # Autosave to outputs folder if enabled
+    # Create side-by-side comparison if requested
+    comparison_path = None
+    if create_comparison and is_video(input_path):
+        progress(0.97, desc="Creating side-by-side comparison...")
+        comparison_filename = f"{input_basename}_{mode}_s{scale}_comparison_{timestamp}.mp4"
+        comparison_temp_path = os.path.join(TEMP_DIR, comparison_filename)
+        comparison_path = create_side_by_side_comparison(input_path, temp_output_path, comparison_temp_path)
+        
+        # Always save comparison video when it's created (regardless of autosave state)
+        if comparison_path:
+            comparison_save_path = os.path.join(OUTPUT_DIR, comparison_filename)
+            shutil.copy(comparison_path, comparison_save_path)
+            log(f"Side-by-side comparison saved to: {comparison_save_path}", message_type="finish")
+    
+    # Autosave upscaled output to outputs folder if enabled
     if autosave:  
         final_save_path = os.path.join(OUTPUT_DIR, output_filename)
         shutil.copy(temp_output_path, final_save_path)
@@ -705,11 +773,12 @@ def run_flashvsr_single(
     
     progress(1, desc="Done!")
     
-    # Return: video_output, output_file_path, video_slider_output
+    # Always display the upscaled output video (not the comparison)
+    # This makes the manual save button behavior consistent
     return (
-        temp_output_path,
-        temp_output_path,
-        (input_path, temp_output_path)
+        temp_output_path,  # Display the upscaled output
+        temp_output_path,  # Path for manual save
+        (input_path, temp_output_path)  # Video slider comparison
     )
 
 
@@ -1412,6 +1481,7 @@ def process_video_with_chunks(
         try:
             # Process this chunk using the main processing function
             # Seed is already fixed at the start, so all chunks use the same seed
+            # Note: create_comparison=False for chunks (comparison only works on full video)
             output_path, _, _ = run_flashvsr_single(
                 input_path=chunk_path,
                 mode=mode,
@@ -1432,6 +1502,7 @@ def process_video_with_chunks(
                 kv_ratio=kv_ratio,
                 local_range=local_range,
                 autosave=False,
+                create_comparison=False,  # No comparison for individual chunks
                 progress=gr.Progress()
             )
             
@@ -1697,7 +1768,7 @@ def create_ui():
                                     minimum=256,
                                     maximum=2048,
                                     step=64,
-                                    value=768,
+                                    value=512,
                                     label="Target Width (pixels)",
                                     info="Video will be resized maintaining aspect ratio",
                                     interactive=True
@@ -1737,7 +1808,7 @@ def create_ui():
                             # Chunk processing mode
                             with gr.Row():
                                 enable_chunk_processing = gr.Checkbox(
-                                    label="Process as Chunks (Low VRAM Mode)",
+                                    label="Process as Chunks [Experimental] ",
                                     value=False,
                                     info="Splits video into segments to reduce RAM/VRAM usage. Best for short-form, single-scene content."
                                 )
@@ -1767,6 +1838,7 @@ def create_ui():
                             with gr.Row():
                                 config = load_config()
                                 autosave_checkbox = gr.Checkbox(label="Autosave Output", value=config.get("autosave", True))
+                                create_comparison_checkbox = gr.Checkbox(label="Create Comparison Video", value=False, info="Side-by-side before/after. Always saved. Not available for chunked/batch jobs.")
                                 clear_on_start_checkbox = gr.Checkbox(label="Clear Temp on Start", value=config.get("clear_temp_on_start", False))
                             with gr.Row():                                
                                 open_folder_button = gr.Button("Open Output Folder", size="sm")
@@ -1808,9 +1880,9 @@ def create_ui():
                                     info="Temporal attention window. 9 = sharper details, 11 = smoother/more stable"
                                 )
                                 quality_slider = gr.Slider(
-                                    minimum=1, maximum=10, step=1, value=6, 
+                                    minimum=1, maximum=10, step=1, value=5, 
                                     label="Output Video Quality", 
-                                    info="Affects filesize more than visual quality. 4-6 = good balance, 8+ = huge files"
+                                    info="Higher = better quality, larger files. 5 = balanced, 8+ = near-lossless (huge files)"
                                 )
                             with gr.Column(scale=1):
                                 kv_ratio_slider = gr.Slider(
@@ -2089,22 +2161,6 @@ def create_ui():
             show_progress="hidden"
         )
         
-        # clear_temp_button.click(
-            # fn=clear_temp_files, 
-            # inputs=[], 
-            # outputs=[save_status]
-        # ).then(
-            # fn=do_sleep,
-            # inputs=None,
-            # outputs=None,
-            # show_progress="hidden"
-        # ).then(
-            # fn=do_clear,
-            # inputs=None,
-            # outputs=[save_status],
-            # show_progress="hidden"
-        # )
-        
         save_button.click(
             fn=save_file_manually, 
             inputs=[output_file_path], 
@@ -2128,10 +2184,13 @@ def create_ui():
             
             # Update resize slider maximum to video width (or keep 2048 if video is larger)
             slider_max = min(width, 2048) if width > 0 else 2048
-            slider_value = min(768, slider_max)  # Default to 768 or lower if video is smaller
+            # Clamp the value between minimum (256) and the new maximum
+            # Use 512 as preferred default (matches slider initial value)
+            slider_value = max(256, min(512, slider_max))
             
-            # Update resize slider
+            # Update resize slider - set both value and maximum to prevent reset button errors
             resize_slider_update = gr.update(
+                minimum=256,
                 maximum=slider_max,
                 value=slider_value,
                 interactive=(width > 0)
@@ -2189,7 +2248,7 @@ def create_ui():
                     0,
                     0,
                     0,
-                    gr.update(maximum=2048, value=768, interactive=False),
+                    gr.update(minimum=256, maximum=2048, value=512, interactive=False),
                     '<div style="padding: 8px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; color: #6c757d; font-size: 0.9em; text-align: center;">Upload video to enable resize</div>',
                     gr.update(maximum=60, value=0, interactive=False),
                     gr.update(maximum=60, value=0, interactive=False),
@@ -2249,8 +2308,10 @@ def create_ui():
             html, width, height = analyze_input_video(trimmed_path)
             duration = get_video_duration(trimmed_path)
             
-            resize_slider_update = gr.update(maximum=min(width, 2048) if width > 0 else 2048, value=min(768, min(width, 2048) if width > 0 else 2048))
-            resize_preview = preview_resize(trimmed_path, min(768, min(width, 2048) if width > 0 else 2048))
+            slider_max = min(width, 2048) if width > 0 else 2048
+            slider_value = max(256, min(512, slider_max))
+            resize_slider_update = gr.update(minimum=256, maximum=slider_max, value=slider_value)
+            resize_preview = preview_resize(trimmed_path, slider_value)
             
             trim_start_update = gr.update(maximum=duration if duration > 0 else 60, value=0)
             trim_end_update = gr.update(maximum=duration if duration > 0 else 60, value=0)
@@ -2273,9 +2334,10 @@ def create_ui():
             duration = get_video_duration(resized_path)
             
             resize_slider_max = min(width, 2048) if width > 0 else 2048
-            resize_slider_value = min(max_width, resize_slider_max)
+            # Clamp value between minimum and maximum
+            resize_slider_value = max(256, min(max_width, resize_slider_max))
             
-            resize_slider_update = gr.update(maximum=resize_slider_max, value=resize_slider_value)
+            resize_slider_update = gr.update(minimum=256, maximum=resize_slider_max, value=resize_slider_value)
             resize_preview = preview_resize(resized_path, resize_slider_value)
             
             trim_start_update = gr.update(maximum=duration if duration > 0 else 60, value=0)
@@ -2294,10 +2356,10 @@ def create_ui():
         def handle_processing(
             input_path, enable_chunks, chunk_duration, mode, scale, color_fix, tiled_vae,
             tiled_dit, tile_size, tile_overlap, unload_dit, dtype_str, seed, device,
-            fps_override, quality, attention_mode, sparse_ratio, kv_ratio, local_range, autosave
+            fps_override, quality, attention_mode, sparse_ratio, kv_ratio, local_range, autosave, create_comparison
         ):
             if enable_chunks:
-                # Use chunk processing mode
+                # Use chunk processing mode (comparison not supported in chunk mode)
                 return process_video_with_chunks(
                     input_path, chunk_duration, mode, scale, color_fix, tiled_vae, tiled_dit,
                     tile_size, tile_overlap, unload_dit, dtype_str, seed, device, fps_override,
@@ -2308,7 +2370,7 @@ def create_ui():
                 return run_flashvsr_single(
                     input_path, mode, scale, color_fix, tiled_vae, tiled_dit, tile_size,
                     tile_overlap, unload_dit, dtype_str, seed, device, fps_override, quality,
-                    attention_mode, sparse_ratio, kv_ratio, local_range, autosave
+                    attention_mode, sparse_ratio, kv_ratio, local_range, autosave, create_comparison
                 )
         
         run_button.click(
@@ -2318,7 +2380,7 @@ def create_ui():
                 mode_radio, scale_slider, color_fix_checkbox, tiled_vae_checkbox,
                 tiled_dit_checkbox, tile_size_slider, tile_overlap_slider, unload_dit_checkbox,
                 dtype_radio, seed_number, device_textbox, fps_number, quality_slider, attention_mode_radio,
-                sparse_ratio_slider, kv_ratio_slider, local_range_slider, autosave_checkbox
+                sparse_ratio_slider, kv_ratio_slider, local_range_slider, autosave_checkbox, create_comparison_checkbox
             ],
             outputs=[video_output, output_file_path, video_slider_output]
         )
@@ -2564,21 +2626,6 @@ def create_ui():
             outputs=[tb_input_video, tb_status_message]
         )
 
-        # Clear temp button
-        # def clear_toolbox_temp():
-            # try:
-                # if toolbox_processor.temp_dir.exists():
-                    # shutil.rmtree(toolbox_processor.temp_dir)
-                    # os.makedirs(toolbox_processor.temp_dir, exist_ok=True)
-                    # return "✅ Toolbox temp files cleared."
-                # return "ℹ️ Temp directory doesn't exist."
-            # except Exception as e:
-                # return f"❌ Error clearing temp files: {e}"
-        
-        # tb_clear_temp_btn.click(
-            # fn=clear_toolbox_temp,
-            # outputs=[tb_status_message]
-        # )
 
         # Footer with author credits
         footer_html = """
