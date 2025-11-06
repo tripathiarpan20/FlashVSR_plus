@@ -26,7 +26,7 @@ from gradio_videoslider import VideoSlider
 from src import ModelManager, FlashVSRFullPipeline, FlashVSRTinyPipeline, FlashVSRTinyLongPipeline
 from src.models import wan_video_dit
 from src.models.TCDecoder import build_tcdecoder
-from src.models.utils import get_device_list, clean_vram, Buffer_LQ4x_Proj
+from src.models.utils import get_device_list, clean_vram, Buffer_LQ4x_Proj, Causal_LQ4x_Proj
 
 from toolbox.system_monitor import SystemMonitor
 from toolbox.toolbox import ToolboxProcessor
@@ -112,12 +112,21 @@ def log(message:str, message_type:str="normal"):
 def dummy_tqdm(iterable, *args, **kwargs):
     return iterable
 
-def model_download(model_name="JunhaoZhuang/FlashVSR"):
-    model_dir = os.path.join(ROOT_DIR, "models", "FlashVSR")
+def model_download(model_version="v1.0"):
+    """Download FlashVSR models from HuggingFace. Supports v1.0 and v1.1."""
+    if model_version == "v1.1":
+        # v1.1 models are in the same repo but different subfolder
+        model_name = "JunhaoZhuang/FlashVSR-v1.1"
+        model_dir = os.path.join(ROOT_DIR, "models", "FlashVSR-v1.1")
+        # Note: If v1.1 gets its own repo, update model_name here
+    else:  # v1.0
+        model_name = "JunhaoZhuang/FlashVSR"
+        model_dir = os.path.join(ROOT_DIR, "models", "FlashVSR")
+    
     if not os.path.exists(model_dir):
-        log(f"Downloading model '{model_name}' from huggingface...", message_type='info')
+        log(f"Downloading {model_version} model '{model_name}' from huggingface...", message_type='info')
         snapshot_download(repo_id=model_name, local_dir=model_dir, local_dir_use_symlinks=False, resume_download=True)
-        log("Model download complete!", message_type='finish')
+        log(f"{model_version} model download complete!", message_type='finish')
         print()
 
 def tensor2video(frames: torch.Tensor):
@@ -511,9 +520,20 @@ def clear_temp_files():
         return f'<div style="padding: 1px; background-color: #f8d7da; border: 1px solid #f5c6cb; border-radius: 1px; color: #721c24;">❌ Error clearing temp files: {e}</div>'
     
 
-def init_pipeline(mode, device, dtype):
-    model_download()
-    model_path = os.path.join(ROOT_DIR, "models", "FlashVSR")
+def init_pipeline(mode, device, dtype, model_version="v1.0"):
+    """Initialize FlashVSR pipeline with specified model version (v1.0 or v1.1)."""
+    model_download(model_version=model_version)
+    
+    # Select model path and projection class based on version
+    if model_version == "v1.1":
+        model_path = os.path.join(ROOT_DIR, "models", "FlashVSR-v1.1")
+        proj_class = Causal_LQ4x_Proj  # v1.1 uses causal projection for improved stability
+        log(f"Initializing FlashVSR v1.1 ({mode} mode) - Enhanced stability + fidelity", message_type='info')
+    else:  # v1.0
+        model_path = os.path.join(ROOT_DIR, "models", "FlashVSR")
+        proj_class = Buffer_LQ4x_Proj  # v1.0 uses original buffer projection
+        log(f"Initializing FlashVSR v1.0 ({mode} mode)", message_type='info')
+    
     ckpt_path, vae_path, lq_path, tcd_path, prompt_path = [os.path.join(model_path, f) for f in ["diffusion_pytorch_model_streaming_dmd.safetensors", "Wan2.1_VAE.pth", "LQ_proj_in.ckpt", "TCDecoder.ckpt", "../posi_prompt.pth"]]
     mm = ModelManager(torch_dtype=dtype, device="cpu")
     if mode == "full":
@@ -522,7 +542,9 @@ def init_pipeline(mode, device, dtype):
         mm.load_models([ckpt_path]); pipe = FlashVSRTinyPipeline.from_model_manager(mm, device=device) if mode == "tiny" else FlashVSRTinyLongPipeline.from_model_manager(mm, device=device)
         pipe.TCDecoder = build_tcdecoder(new_channels=[512, 256, 128, 128], device=device, dtype=dtype, new_latent_channels=16+768)
         pipe.TCDecoder.load_state_dict(torch.load(tcd_path, map_location=device, weights_only=False), strict=False); pipe.TCDecoder.clean_mem()
-    pipe.denoising_model().LQ_proj_in = Buffer_LQ4x_Proj(in_dim=3, out_dim=1536, layer_num=1).to(device, dtype=dtype)
+    
+    # Use version-specific projection class
+    pipe.denoising_model().LQ_proj_in = proj_class(in_dim=3, out_dim=1536, layer_num=1).to(device, dtype=dtype)
     if os.path.exists(lq_path): pipe.denoising_model().LQ_proj_in.load_state_dict(torch.load(lq_path, map_location="cpu", weights_only=False), strict=True)
     pipe.to(device, dtype=dtype); pipe.enable_vram_management(); pipe.init_cross_kv(prompt_path=prompt_path); pipe.load_models_to_device(["dit", "vae"])
     return pipe
@@ -531,6 +553,7 @@ def init_pipeline(mode, device, dtype):
 def run_flashvsr_single(
     input_path,
     mode,
+    model_version,
     scale,
     color_fix,
     tiled_vae,
@@ -595,7 +618,7 @@ def run_flashvsr_single(
     if tiled_dit:
         N, H, W, C = frames.shape
         progress(0.1, desc="Initializing model pipeline...")
-        pipe = init_pipeline(mode, _device, dtype)
+        pipe = init_pipeline(mode, _device, dtype, model_version=model_version)
         tile_coords = calculate_tile_coords(H, W, tile_size, tile_overlap)
 
         if mode == "tiny-long":
@@ -706,7 +729,7 @@ def run_flashvsr_single(
             clean_vram()
     else: # Non-tiled mode
         progress(0.1, desc="Initializing model pipeline...")
-        pipe = init_pipeline(mode, _device, dtype)
+        pipe = init_pipeline(mode, _device, dtype, model_version=model_version)
         log(f"Processing {frames.shape[0]} frames...", message_type='info')
 
         th, tw, F = get_input_params(frames, scale)
@@ -785,6 +808,7 @@ def run_flashvsr_single(
 def run_flashvsr_batch(
     batch_files,
     mode,
+    model_version,
     scale,
     color_fix,
     tiled_vae,
@@ -842,6 +866,7 @@ def run_flashvsr_batch(
             temp_output_path, _, _ = run_flashvsr_single(
                 input_path=video_path,
                 mode=mode,
+                model_version=model_version,
                 scale=scale,
                 color_fix=color_fix,
                 tiled_vae=tiled_vae,
@@ -1436,7 +1461,7 @@ def combine_video_chunks(chunk_paths, output_name_base, progress=gr.Progress()):
         return None
 
 def process_video_with_chunks(
-    input_path, chunk_duration, mode, scale, color_fix, tiled_vae, tiled_dit,
+    input_path, chunk_duration, mode, model_version, scale, color_fix, tiled_vae, tiled_dit,
     tile_size, tile_overlap, unload_dit, dtype_str, seed, device, fps_override,
     quality, attention_mode, sparse_ratio, kv_ratio, local_range, autosave,
     progress=gr.Progress()
@@ -1485,6 +1510,7 @@ def process_video_with_chunks(
             output_path, _, _ = run_flashvsr_single(
                 input_path=chunk_path,
                 mode=mode,
+                model_version=model_version,
                 scale=scale,
                 color_fix=color_fix,
                 tiled_vae=tiled_vae,
@@ -1789,6 +1815,13 @@ def create_ui():
                         with gr.Group():
                             with gr.Row():
                                 mode_radio = gr.Radio(choices=["tiny", "full"], value="tiny", label="Pipeline Mode", info="'Full' requires 24GB(+) VRAM")
+                                model_version_radio = gr.Radio(
+                                    choices=["v1.0", "v1.1"], 
+                                    value="v1.0", 
+                                    label="Model Version", 
+                                    info="v1.1: Enhanced stability + fidelity (Nov 2025)"
+                                )
+                            with gr.Row():
                                 seed_number = gr.Number(value=-1, label="Seed", precision=0, info="-1 = random")
                         with gr.Group():
                             with gr.Row():
@@ -2354,21 +2387,21 @@ def create_ui():
         
         # Main processing handler - routes to chunk or normal processing
         def handle_processing(
-            input_path, enable_chunks, chunk_duration, mode, scale, color_fix, tiled_vae,
+            input_path, enable_chunks, chunk_duration, mode, model_version, scale, color_fix, tiled_vae,
             tiled_dit, tile_size, tile_overlap, unload_dit, dtype_str, seed, device,
             fps_override, quality, attention_mode, sparse_ratio, kv_ratio, local_range, autosave, create_comparison
         ):
             if enable_chunks:
                 # Use chunk processing mode (comparison not supported in chunk mode)
                 return process_video_with_chunks(
-                    input_path, chunk_duration, mode, scale, color_fix, tiled_vae, tiled_dit,
+                    input_path, chunk_duration, mode, model_version, scale, color_fix, tiled_vae, tiled_dit,
                     tile_size, tile_overlap, unload_dit, dtype_str, seed, device, fps_override,
                     quality, attention_mode, sparse_ratio, kv_ratio, local_range, autosave
                 )
             else:
                 # Use normal processing
                 return run_flashvsr_single(
-                    input_path, mode, scale, color_fix, tiled_vae, tiled_dit, tile_size,
+                    input_path, mode, model_version, scale, color_fix, tiled_vae, tiled_dit, tile_size,
                     tile_overlap, unload_dit, dtype_str, seed, device, fps_override, quality,
                     attention_mode, sparse_ratio, kv_ratio, local_range, autosave, create_comparison
                 )
@@ -2377,7 +2410,7 @@ def create_ui():
             fn=handle_processing,
             inputs=[
                 input_video, enable_chunk_processing, chunk_duration_slider,
-                mode_radio, scale_slider, color_fix_checkbox, tiled_vae_checkbox,
+                mode_radio, model_version_radio, scale_slider, color_fix_checkbox, tiled_vae_checkbox,
                 tiled_dit_checkbox, tile_size_slider, tile_overlap_slider, unload_dit_checkbox,
                 dtype_radio, seed_number, device_textbox, fps_number, quality_slider, attention_mode_radio,
                 sparse_ratio_slider, kv_ratio_slider, local_range_slider, autosave_checkbox, create_comparison_checkbox
@@ -2411,12 +2444,12 @@ def create_ui():
 
         # Batch processing handler
         def handle_batch_processing(
-            batch_files, mode, scale, color_fix, tiled_vae, tiled_dit, tile_size, tile_overlap,
+            batch_files, mode, model_version, scale, color_fix, tiled_vae, tiled_dit, tile_size, tile_overlap,
             unload_dit, dtype_str, seed, device, fps_override, quality, attention_mode,
             sparse_ratio, kv_ratio, local_range
         ):
             last_video, status_msg = run_flashvsr_batch(
-                batch_files, mode, scale, color_fix, tiled_vae, tiled_dit, tile_size, tile_overlap,
+                batch_files, mode, model_version, scale, color_fix, tiled_vae, tiled_dit, tile_size, tile_overlap,
                 unload_dit, dtype_str, seed, device, fps_override, quality, attention_mode,
                 sparse_ratio, kv_ratio, local_range
             )
@@ -2426,7 +2459,7 @@ def create_ui():
         batch_run_button.click(
             fn=handle_batch_processing,
             inputs=[
-                flashvsr_batch_input_files, mode_radio, scale_slider, color_fix_checkbox, tiled_vae_checkbox,
+                flashvsr_batch_input_files, mode_radio, model_version_radio, scale_slider, color_fix_checkbox, tiled_vae_checkbox,
                 tiled_dit_checkbox, tile_size_slider, tile_overlap_slider, unload_dit_checkbox,
                 dtype_radio, seed_number, device_textbox, fps_number, quality_slider, attention_mode_radio,
                 sparse_ratio_slider, kv_ratio_slider, local_range_slider
@@ -2679,7 +2712,12 @@ if __name__ == "__main__":
             log("Temp files cleared on startup.", message_type="info")
     
     os.makedirs(TEMP_DIR, exist_ok=True)
-    model_download()
+    
+    # Model download now happens on-demand when user starts processing
+    # This allows downloading only the version they select (v1.0 or v1.1)
+    log("FlashVSR+ WebUI starting...", message_type="info")
+    log("Models will be downloaded automatically when you start processing.", message_type="info")
+    
     ui = create_ui()
     if args.listen:
         ui.queue().launch(share=False, server_name="0.0.0.0", server_port=args.port)

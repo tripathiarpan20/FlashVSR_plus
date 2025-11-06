@@ -13,7 +13,7 @@ from tqdm import tqdm
 # import pyfiglet
 
 from ..models import ModelManager
-from ..models.utils import clean_vram
+from ..models.utils import clean_vram, Buffer_LQ4x_Proj, Causal_LQ4x_Proj
 from ..models.wan_video_dit import WanModel, RMSNorm, sinusoidal_embedding_1d
 from ..models.wan_video_vae import WanVideoVAE, RMS_norm, CausalConv3d, Upsample
 from ..schedulers.flow_match import FlowMatchScheduler

@@ -15,7 +15,7 @@ import imageio
 # import pyfiglet
 
 from ..models import ModelManager
-from ..models.utils import clean_vram, FrameStreamBuffer, TensorAsBuffer, tensor_to_imageio_frame
+from ..models.utils import clean_vram, FrameStreamBuffer, TensorAsBuffer, tensor_to_imageio_frame, Buffer_LQ4x_Proj, Causal_LQ4x_Proj
 from ..models.wan_video_dit import WanModel, RMSNorm, sinusoidal_embedding_1d
 from ..models.wan_video_vae import WanVideoVAE, RMS_norm, CausalConv3d, Upsample
 from ..schedulers.flow_match import FlowMatchScheduler
