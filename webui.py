@@ -1,6 +1,7 @@
 import sys
 import argparse
 import gradio as gr
+from gradio import ImageSlider
 import os
 import re
 import math
@@ -495,7 +496,18 @@ def save_file_manually(temp_path):
         return '<div style="padding: 1px; background-color: #f8d7da; border: 1px solid #f5c6cb; border-radius: 1px; color: #721c24;">❌ No file to save.</div>'
     
     filename = os.path.basename(temp_path)
-    final_path = os.path.join(OUTPUT_DIR, filename)
+    
+    # Determine if it's an image or video based on extension
+    ext = os.path.splitext(filename)[1].lower()
+    is_image = ext in ['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif']
+    
+    # Save to appropriate subfolder
+    if is_image:
+        images_output_dir = os.path.join(OUTPUT_DIR, "images")
+        os.makedirs(images_output_dir, exist_ok=True)
+        final_path = os.path.join(images_output_dir, filename)
+    else:
+        final_path = os.path.join(OUTPUT_DIR, filename)
     
     try:
         shutil.copy(temp_path, final_path)
@@ -805,6 +817,409 @@ def run_flashvsr_single(
     )
 
 
+def analyze_input_image(image_path):
+    """Analyzes image and returns compact HTML display for Image Upscaling tab."""
+    if not image_path:
+        return '<div style="padding: 12px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 6px; color: #856404;">⚠️ No image provided</div>', 0, 0
+    
+    try:
+        resolved_path = str(Path(image_path).resolve())
+        
+        # Get file size
+        file_size_display = "N/A"
+        if os.path.exists(resolved_path):
+            size_bytes = os.path.getsize(resolved_path)
+            if size_bytes < 1024**2:
+                file_size_display = f"{size_bytes/1024:.1f} KB"
+            elif size_bytes < 1024**3:
+                file_size_display = f"{size_bytes/1024**2:.1f} MB"
+            else:
+                file_size_display = f"{size_bytes/1024**3:.2f} GB"
+        
+        # Load image to get dimensions
+        img = Image.open(resolved_path)
+        width, height = img.size
+        
+        # Calculate megapixels
+        megapixels = (width * height) / 1_000_000
+        
+        # Build compact HTML display (2-column layout for images)
+        html = f'''
+        <div style="padding: 16px; background: linear-gradient(135deg, #667eea15 0%, #764ba215 100%); border: 1px solid #667eea40; border-radius: 8px; font-family: 'Segoe UI', sans-serif;">
+            <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 8px;">
+                <div style="background: linear-gradient(135deg, #d1ecf1 0%, rgba(209, 236, 241, 0.3) 100%); padding: 10px; border-radius: 6px; border-left: 3px solid #667eea;">
+                    <div style="font-size: 0.8em; color: #292626; margin-bottom: 4px;">RESOLUTION</div>
+                    <div style="font-size: 1.1em; font-weight: 600; color: #415e78;">{width}×{height}</div>
+                </div>
+                <div style="background: linear-gradient(135deg, #bbc1f2 0%, rgba(187, 193, 242, 0.3) 100%); padding: 10px; border-radius: 6px; border-left: 3px solid #764ba2;">
+                    <div style="font-size: 0.8em; color: #292626; margin-bottom: 4px;">MEGAPIXELS</div>
+                    <div style="font-size: 1.1em; font-weight: 600; color: #362e54;">{megapixels:.2f} MP</div>
+                </div>
+                <div style="background: linear-gradient(135deg, #d1ecf1 0%, rgba(209, 236, 241, 0.3) 100%); padding: 10px; border-radius: 6px; border-left: 3px solid #667eea;">
+                    <div style="font-size: 0.8em; color: #292626; margin-bottom: 4px;">FILE SIZE</div>
+                    <div style="font-size: 1.1em; font-weight: 600; color: #415e78;">{file_size_display}</div>
+                </div>
+                <div style="background: linear-gradient(135deg, #bbc1f2 0%, rgba(187, 193, 242, 0.3) 100%); padding: 10px; border-radius: 6px; border-left: 3px solid #764ba2;">
+                    <div style="font-size: 0.8em; color: #292626; margin-bottom: 4px;">FORMAT</div>
+                    <div style="font-size: 1.1em; font-weight: 600; color: #362e54;">{img.format or 'Unknown'}</div>
+                </div>
+            </div>
+            <div style="font-size: 0.8em; color: #666; text-align: center; margin-top: 8px;">
+                ℹ️ Output dimensions are padded to multiples of 128 (model requirement). Small black borders may appear to preserve aspect ratio.
+            </div>
+        </div>
+        '''
+        return html, width, height
+        
+    except Exception as e:
+        return f'<div style="padding: 12px; background: #f8d7da; border: 1px solid #f5c6cb; border-radius: 6px; color: #721c24;">❌ Error analyzing image: {str(e)}</div>', 0, 0
+
+
+def get_image_dimensions(image_path):
+    """Get image dimensions quickly. Returns (width, height) or (0, 0) on error."""
+    try:
+        if not image_path or not os.path.exists(image_path):
+            return 0, 0
+        img = Image.open(image_path)
+        return img.size
+    except:
+        return 0, 0
+
+
+def preview_image_resize(image_path, max_width):
+    """Generate preview text showing what resize will do for images."""
+    if not image_path:
+        return '<div style="padding: 8px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; color: #6c757d; font-size: 0.9em; text-align: center;">No image loaded</div>'
+    
+    current_width, current_height = get_image_dimensions(image_path)
+    if current_width == 0:
+        return '<div style="padding: 8px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; color: #856404; font-size: 0.9em; text-align: center;">⚠️ Could not read image dimensions</div>'
+    
+    # Use even dimensions (aspect ratio preserved, padding to 128 handled during upscaling)
+    new_width, new_height, will_resize = calculate_resize_dimensions(current_width, current_height, max_width)
+    
+    # Check if image is small enough to not need tiled DiT
+    pixels = current_width * current_height
+    small_image_threshold = 512 * 512  # ~512p or smaller
+    
+    if will_resize:
+        reduction = ((current_width * current_height - new_width * new_height) / (current_width * current_height)) * 100
+        return f'<div style="padding: 8px; background: #d4edda; border: 1px solid #c3e6cb; border-radius: 4px; color: #155724; font-size: 0.9em; text-align: center;">{current_width}×{current_height} → {new_width}×{new_height} ({reduction:.0f}% reduction) ✓</div>'
+    else:
+        if pixels <= small_image_threshold:
+            return f'<div style="padding: 8px; background: #d1ecf1; border: 1px solid #bee5eb; border-radius: 4px; color: #0c5460; font-size: 0.9em; text-align: center;">{current_width}×{current_height} (no resize needed) ✓<br><span style="color: #0c5460; font-size: 0.9em;">💡 Small resolution - consider disabling Tiled DiT for better speed and quality</span></div>'
+        else:
+            return f'<div style="padding: 8px; background: #d1ecf1; border: 1px solid #bee5eb; border-radius: 4px; color: #0c5460; font-size: 0.9em; text-align: center;">{current_width}×{current_height} (no resize needed) ✓</div>'
+
+
+def resize_input_image(image_path, max_width, progress=gr.Progress()):
+    """
+    Resizes image for FlashVSR preprocessing using PIL.
+    Never upsizes - only downsizes if needed.
+    Maintains aspect ratio (padding to 128-multiples handled during upscaling).
+    Returns path to resized image (or original if no resize needed).
+    """
+    if not image_path or not os.path.exists(image_path):
+        log("No image provided for resize", message_type="warning")
+        return image_path
+    
+    current_width, current_height = get_image_dimensions(image_path)
+    # Use even dimensions (aspect ratio preserved, padding to 128 handled during upscaling)
+    new_width, new_height, will_resize = calculate_resize_dimensions(current_width, current_height, max_width)
+    
+    if not will_resize:
+        log(f"Image is already {current_width}×{current_height}, no resize needed", message_type="info")
+        return image_path
+    
+    try:
+        log(f"Resizing image from {current_width}×{current_height} to {new_width}×{new_height}...", message_type="info")
+        progress(0.3, desc="Resizing input image...")
+        
+        # Load and resize image
+        img = Image.open(image_path)
+        img_resized = img.resize((new_width, new_height), Image.LANCZOS)
+        
+        # Generate output path in temp directory
+        input_basename = os.path.splitext(os.path.basename(image_path))[0]
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        ext = os.path.splitext(image_path)[1] or '.png'
+        output_filename = f"{input_basename}_resized_{new_width}x{new_height}_{timestamp}{ext}"
+        output_path = os.path.join(TEMP_DIR, output_filename)
+        
+        # Save resized image
+        img_resized.save(output_path, quality=95)
+        
+        progress(1.0, desc="Resize complete!")
+        log(f"Image resized successfully: {output_path}", message_type="finish")
+        return output_path
+        
+    except Exception as e:
+        log(f"Error resizing image: {e}", message_type="error")
+        import traceback
+        log(traceback.format_exc(), message_type="error")
+        return image_path
+
+
+def run_flashvsr_batch_image(
+    batch_files,
+    mode,
+    model_version,
+    scale,
+    color_fix,
+    tiled_vae,
+    tiled_dit,
+    tile_size,
+    tile_overlap,
+    unload_dit,
+    dtype_str,
+    seed,
+    device,
+    fps_override,
+    quality,
+    attention_mode,
+    sparse_ratio,
+    kv_ratio,
+    local_range,
+    create_comparison,
+    progress=gr.Progress(track_tqdm=True)
+):
+    """Processes a batch of images through FlashVSR, saving all to a timestamped subfolder."""
+    if not batch_files:
+        log("No files provided for batch image processing.", message_type='warning')
+        return None, "⚠️ No files provided for batch processing."
+    
+    # Extract file paths from the uploaded files
+    input_paths = [file.name if hasattr(file, 'name') else file for file in batch_files]
+    total_images = len(input_paths)
+    
+    log(f"Starting batch processing for {total_images} images...", message_type='info')
+    
+    # Create batch subfolder with timestamp in images folder
+    batch_folder_name = f"batch_{time.strftime('%Y%m%d_%H%M%S')}"
+    images_output_dir = os.path.join(OUTPUT_DIR, "images")
+    batch_output_dir = os.path.join(images_output_dir, batch_folder_name)
+    os.makedirs(batch_output_dir, exist_ok=True)
+    
+    batch_messages = [f"🚀 Starting batch process for {total_images} images..."]
+    last_output_path = None
+    
+    for i, image_path in enumerate(input_paths):
+        try:
+            # Update batch progress
+            batch_progress = (i / total_images)
+            progress(batch_progress, desc=f"Batch: Processing image {i+1}/{total_images}: {os.path.basename(image_path)}")
+            log(f"\n--- Processing image {i+1}/{total_images}: {os.path.basename(image_path)} ---", message_type='info')
+            batch_messages.append(f"\n--- Image {i+1}/{total_images}: {os.path.basename(image_path)} ---")
+            
+            # Create a dummy progress object that doesn't interfere with batch progress
+            class DummyProgress:
+                def __call__(self, *args, **kwargs):
+                    pass
+                def tqdm(self, iterable, *args, **kwargs):
+                    return iterable
+            
+            # Process the image using the single image function
+            temp_output_path, _, _ = run_flashvsr_image(
+                image_path=image_path,
+                mode=mode,
+                model_version=model_version,
+                scale=scale,
+                color_fix=color_fix,
+                tiled_vae=tiled_vae,
+                tiled_dit=tiled_dit,
+                tile_size=tile_size,
+                tile_overlap=tile_overlap,
+                unload_dit=unload_dit,
+                dtype_str=dtype_str,
+                seed=seed,
+                device=device,
+                fps_override=fps_override,
+                quality=quality,
+                attention_mode=attention_mode,
+                sparse_ratio=sparse_ratio,
+                kv_ratio=kv_ratio,
+                local_range=local_range,
+                autosave=False,  # Don't autosave to main outputs folder
+                create_comparison=create_comparison,
+                progress=DummyProgress()  # Use dummy progress to avoid conflicts
+            )
+            
+            # Copy the result to the batch subfolder
+            if temp_output_path and os.path.exists(temp_output_path):
+                filename = os.path.basename(temp_output_path)
+                final_path = os.path.join(batch_output_dir, filename)
+                shutil.copy(temp_output_path, final_path)
+                last_output_path = final_path
+                log(f"✅ Saved to batch folder: {final_path}", message_type='finish')
+                batch_messages.append(f"✅ Saved to: {filename}")
+            else:
+                log(f"❌ Processing failed for {os.path.basename(image_path)}", message_type='error')
+                batch_messages.append(f"❌ Processing failed")
+                
+        except Exception as e:
+            log(f"❌ Error processing {os.path.basename(image_path)}: {e}", message_type='error')
+            batch_messages.append(f"❌ Error: {str(e)}")
+            continue
+    
+    progress(1.0, desc="Batch processing complete!")
+    batch_messages.append(f"\n✅ Batch processing complete! All results saved to: {batch_output_dir}")
+    log(f"Batch processing complete! Results saved to: {batch_output_dir}", message_type='finish')
+    
+    # Return the last processed image and a status message
+    status_message = "\n".join(batch_messages)
+    return last_output_path, status_message
+
+
+def run_flashvsr_image(
+    image_path,
+    mode,
+    model_version,
+    scale,
+    color_fix,
+    tiled_vae,
+    tiled_dit,
+    tile_size,
+    tile_overlap,
+    unload_dit,
+    dtype_str,
+    seed,
+    device,
+    fps_override,
+    quality,
+    attention_mode,
+    sparse_ratio,
+    kv_ratio,
+    local_range,
+    autosave,
+    create_comparison,
+    progress=gr.Progress(track_tqdm=True)
+):
+    """Process a single image by duplicating it 21 times and extracting the middle frame from output."""
+    if not image_path:
+        log("No input image provided.", message_type='warning')
+        return None, None, None
+    
+    temp_frames_dir = None
+    try:
+        # Prepare image as frames
+        progress(0.05, desc="Preparing image frames...")
+        temp_frames_dir = prepare_image_as_frames(image_path)
+        if not temp_frames_dir:
+            return None, None, None
+        
+        # Process through the video pipeline
+        video_output, save_path, slider_data = run_flashvsr_single(
+            input_path=temp_frames_dir,
+            mode=mode,
+            model_version=model_version,
+            scale=scale,
+            color_fix=color_fix,
+            tiled_vae=tiled_vae,
+            tiled_dit=tiled_dit,
+            tile_size=tile_size,
+            tile_overlap=tile_overlap,
+            unload_dit=unload_dit,
+            dtype_str=dtype_str,
+            seed=seed,
+            device=device,
+            fps_override=fps_override,
+            quality=quality,
+            attention_mode=attention_mode,
+            sparse_ratio=sparse_ratio,
+            kv_ratio=kv_ratio,
+            local_range=local_range,
+            autosave=False,  # We'll handle saving separately
+            create_comparison=False,
+            progress=progress
+        )
+        
+        if not video_output or not os.path.exists(video_output):
+            log("Image processing failed", message_type="error")
+            return None, None, None
+        
+        # Extract middle frame from the output video
+        progress(0.95, desc="Extracting upscaled image...")
+        log("Extracting middle frame from output...", message_type="info")
+        
+        with imageio.get_reader(video_output) as reader:
+            num_frames = reader.count_frames()
+            middle_frame_idx = num_frames // 2
+            
+            # Read the middle frame
+            for idx, frame in enumerate(reader):
+                if idx == middle_frame_idx:
+                    middle_frame = frame
+                    break
+        
+        # Save the extracted frame as an image
+        input_basename = os.path.splitext(os.path.basename(image_path))[0]
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        output_filename = f"{input_basename}_{mode}_s{scale}_{timestamp}.png"
+        temp_image_path = os.path.join(TEMP_DIR, output_filename)
+        
+        Image.fromarray(middle_frame).save(temp_image_path)
+        
+        # Autosave if enabled (to images subfolder)
+        if autosave:
+            images_output_dir = os.path.join(OUTPUT_DIR, "images")
+            os.makedirs(images_output_dir, exist_ok=True)
+            final_save_path = os.path.join(images_output_dir, output_filename)
+            shutil.copy(temp_image_path, final_save_path)
+            log(f"Image processing complete! Auto-saved to: {final_save_path}", message_type="finish")
+        else:
+            log(f"Image processing complete! Use 'Save Output' to save to outputs/images folder.", message_type="finish")
+        
+        progress(1, desc="Done!")
+        
+        # Prepare images for ImageSlider (before/after tuple)
+        try:
+            input_img = Image.open(image_path).convert('RGB')
+            output_img = Image.open(temp_image_path).convert('RGB')
+            
+            # Resize input to match output for comparison
+            input_resized = input_img.resize(output_img.size, Image.LANCZOS)
+            
+            # Save resized input for ImageSlider
+            input_resized_filename = f"{input_basename}_input_resized_{timestamp}.png"
+            input_resized_path = os.path.join(TEMP_DIR, input_resized_filename)
+            input_resized.save(input_resized_path)
+            
+            # ImageSlider expects tuple of (before, after) paths
+            comparison_tuple = (input_resized_path, temp_image_path)
+            
+            # Create stitched side-by-side comparison if requested
+            if create_comparison:
+                log("Creating side-by-side comparison image...", message_type="info")
+                comparison_width = input_resized.width + output_img.width
+                comparison_height = max(input_resized.height, output_img.height)
+                comparison_img = Image.new('RGB', (comparison_width, comparison_height))
+                comparison_img.paste(input_resized, (0, 0))
+                comparison_img.paste(output_img, (input_resized.width, 0))
+                
+                # Save stitched comparison (always saved to images subfolder)
+                images_output_dir = os.path.join(OUTPUT_DIR, "images")
+                os.makedirs(images_output_dir, exist_ok=True)
+                comparison_filename = f"{input_basename}_{mode}_s{scale}_comparison_{timestamp}.png"
+                comparison_save_path = os.path.join(images_output_dir, comparison_filename)
+                comparison_img.save(comparison_save_path, quality=95)
+                log(f"Side-by-side comparison saved to: {comparison_save_path}", message_type="finish")
+                
+        except Exception as e:
+            log(f"Could not create comparison: {e}", message_type="warning")
+            comparison_tuple = None
+        
+        # Return: output_image, output_path_for_save, comparison_tuple_for_slider
+        return temp_image_path, temp_image_path, comparison_tuple
+        
+    finally:
+        # Cleanup temp frames directory
+        if temp_frames_dir and os.path.exists(temp_frames_dir):
+            try:
+                shutil.rmtree(temp_frames_dir)
+                log(f"Cleaned up temp frames directory", message_type="info")
+            except Exception as e:
+                log(f"Warning: Could not clean up temp frames: {e}", message_type="warning")
+
 def run_flashvsr_batch(
     batch_files,
     mode,
@@ -998,11 +1413,14 @@ def analyze_input_video(video_path):
     except Exception as e:
         return f'<div style="padding: 12px; background: #f8d7da; border: 1px solid #f5c6cb; border-radius: 6px; color: #721c24;">❌ Error analyzing video: {str(e)}</div>', 0, 0
 
-def calculate_resize_dimensions(current_width, current_height, max_width):
+def calculate_resize_dimensions(current_width, current_height, max_width, align_to=2):
     """
     Calculate new dimensions for resize, maintaining aspect ratio.
     Never upsizes - only downsizes if needed.
     Returns (new_width, new_height, will_resize)
+    
+    Args:
+        align_to: Alignment requirement (2 for video, 128 for FlashVSR images)
     """
     if current_width <= 0 or current_height <= 0:
         return current_width, current_height, False
@@ -1016,9 +1434,13 @@ def calculate_resize_dimensions(current_width, current_height, max_width):
     new_width = max_width
     new_height = int(max_width * aspect_ratio)
     
-    # Ensure even dimensions (required for video encoding)
-    new_width = new_width if new_width % 2 == 0 else new_width - 1
-    new_height = new_height if new_height % 2 == 0 else new_height - 1
+    # Align dimensions to required multiple
+    new_width = (new_width // align_to) * align_to
+    new_height = (new_height // align_to) * align_to
+    
+    # Ensure minimum size
+    new_width = max(align_to, new_width)
+    new_height = max(align_to, new_height)
     
     return new_width, new_height, True
 
@@ -1226,6 +1648,32 @@ def preview_chunk_processing(video_path, chunk_duration):
         Video: {format_time_mmss(duration)} ({duration:.1f}s) <br>
     </div>'''
 
+
+def prepare_image_as_frames(image_path, num_frames=21):
+    """Duplicate an image 21 times to create a frame folder for processing."""
+    if not image_path or not os.path.exists(image_path):
+        log("No image provided", message_type="warning")
+        return None
+    
+    try:
+        # Create temp folder for frames
+        temp_frames_dir = os.path.join(TEMP_DIR, f"image_frames_{uuid.uuid4().hex[:8]}")
+        os.makedirs(temp_frames_dir, exist_ok=True)
+        
+        log(f"Preparing image for processing (duplicating {num_frames}x)...", message_type="info")
+        
+        # Load and save the image 21 times with sequential naming
+        img = Image.open(image_path)
+        for i in range(num_frames):
+            frame_path = os.path.join(temp_frames_dir, f"{i:05d}.png")
+            img.save(frame_path)
+        
+        log(f"Image frames prepared in: {temp_frames_dir}", message_type="finish")
+        return temp_frames_dir
+        
+    except Exception as e:
+        log(f"Error preparing image frames: {e}", message_type="error")
+        return None
 
 def save_preprocessed_video(video_path, progress=gr.Progress()):
     """Save the current preprocessed video to outputs/preprocessed folder."""
@@ -1732,7 +2180,8 @@ css = """
     object-fit: contain;
     width: 100%;
 }
-.video-window .source-selection {
+.video-window .source-selection,
+.image-window .source-selection {
     display: none !important;
 }
 
@@ -1848,7 +2297,7 @@ def create_ui():
                                 mode_radio = gr.Radio(choices=["tiny", "full"], value="tiny", label="Pipeline Mode", info="'Full' requires 24GB(+) VRAM")
                                 model_version_radio = gr.Radio(
                                     choices=["v1.0", "v1.1"], 
-                                    value="v1.0", 
+                                    value="v1.1", 
                                     label="Model Version", 
                                     info="v1.1: Enhanced stability + fidelity (Nov 2025)"
                                 )
@@ -2009,8 +2458,305 @@ def create_ui():
                         width=1200
                     )  
             
+            # --- IMAGE UPSCALING TAB ---
+            with gr.TabItem("🖼️ Image Upscaling", id=1):
+                with gr.Row():
+                    # --- Left Column: Input & Settings ---
+                    with gr.Column(scale=1):
+                        with gr.Tabs() as img_input_tabs:
+                            with gr.TabItem("Single Image"):                      
+                                img_input = gr.Image(label="Upload Image File", type="filepath", elem_classes="image-window")
+                                img_run_button = gr.Button("Start Processing", variant="primary", size="sm")
+                            with gr.TabItem("Batch Image"):
+                                img_batch_input_files = gr.File(
+                                    label="Upload Multiple Images for Batch Processing",
+                                    file_count="multiple",
+                                    type="filepath",
+                                    height="320px",
+                                )
+                                img_batch_run_button = gr.Button("Start Batch Processing", variant="primary", size="sm")
+                        
+                        # Image Pre-Processing Accordion
+                        with gr.Accordion("📊 Image Pre-Processing", open=False):
+                            img_analysis_html = gr.HTML(
+                                value='<div style="padding: 12px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px; color: #6c757d; text-align: center;">Upload image to see analysis</div>'
+                            )
+                            
+                            gr.Markdown("---")
+                            
+                            # Resize controls in sub-accordion
+                            with gr.Accordion("📐 Resize Image", open=False):
+                                gr.Markdown('<span style="font-size: 0.9em; color: #666;">Reduce resolution to save VRAM and processing time</span>')
+                                
+                                img_resize_max_width_slider = gr.Slider(
+                                    minimum=256,
+                                    maximum=2048,
+                                    step=64,
+                                    value=512,
+                                    label="Target Width (pixels)",
+                                    info="Image will be resized maintaining aspect ratio",
+                                    interactive=True
+                                )
+                                
+                                img_resize_preview_html = gr.HTML(
+                                    value='<div style="padding: 8px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; color: #6c757d; font-size: 0.9em; text-align: center;">Upload and analyze image to enable resize</div>'
+                                )
+                                
+                                img_resize_button = gr.Button("📐 Apply Resize", size="sm", variant="primary")
+                            
+                            # Hidden state to store current image dimensions
+                            img_current_width = gr.State(0)
+                            img_current_height = gr.State(0)
+                        
+                        # Main Settings (mirroring FlashVSR exactly)
+                        with gr.Group():
+                            with gr.Row():
+                                img_mode = gr.Radio(choices=["tiny", "full"], value="tiny", label="Pipeline Mode", info="'Full' requires 24GB(+) VRAM")
+                                img_model_version = gr.Radio(
+                                    choices=["v1.0", "v1.1"], 
+                                    value="v1.1", 
+                                    label="Model Version", 
+                                    info="v1.1: Enhanced stability + fidelity (Nov 2025)"
+                                )
+                            with gr.Row():
+                                img_seed = gr.Number(value=-1, label="Seed", precision=0, info="-1 = random")
+                        
+                        with gr.Group():
+                            with gr.Row():
+                                img_scale = gr.Slider(minimum=2, maximum=4, step=1, value=2, label="Upscale Factor", info="Designed to upscale small/short AI video. Start with x2...")
+                                img_tiled_dit = gr.Checkbox(label="Enable Tiled DiT", info="Greatly reduces VRAM at the cost of speed.", value=True)
+                            with gr.Row(visible=True) as img_tiled_dit_options:
+                                img_tile_size = gr.Slider(
+                                    minimum=64, maximum=512, step=16, value=256, 
+                                    label="Tile Size", 
+                                    info="Smaller = less VRAM (128 uses ~half the VRAM of 256), but more tiles to process"
+                                )
+                                img_tile_overlap = gr.Slider(
+                                    minimum=8, maximum=128, step=8, value=24, 
+                                    label="Tile Overlap", 
+                                    info="Higher = smoother tile blending, but slower. Must be less than half of tile size"
+                                )
+                    
+                    # --- Right Column: Output ---
+                    with gr.Column(scale=1):
+                        with gr.Tabs() as img_output_tabs:
+                            with gr.TabItem("Processed Image"):
+                                img_output = gr.Image(label="Output Result", interactive=False, elem_classes="image-window")
+                            with gr.TabItem("Batch Status"):
+                                img_batch_status = gr.Textbox(
+                                    label="Batch Processing Status",
+                                    lines=15,
+                                    max_lines=15,
+                                    interactive=False,
+                                    show_copy_button=True,
+                                    value="Upload images and click 'Start Batch Processing' to begin."
+                                )
+                        
+                        with gr.Group():
+                            with gr.Row():
+                                img_save_button = gr.Button("Save Manually 💾", size="sm", variant="primary")
+                            with gr.Row():
+                                img_autosave = gr.Checkbox(label="Autosave Output", value=config.get("autosave", True))
+                                img_create_comparison = gr.Checkbox(label="Create Comparison Image", value=False, info="Side-by-side before/after. Always saved.")
+                                img_clear_on_start = gr.Checkbox(label="Clear Temp on Start", value=config.get("clear_temp_on_start", False))
+                            with gr.Row():
+                                img_open_folder_button = gr.Button("Open Output Folder", size="sm")
+                        
+                        with gr.Row():
+                            img_save_status = gr.HTML(
+                                value=random.choice(IDLE_STATES),
+                                padding=False
+                            )
+                        
+                        with gr.Row():
+                            with gr.Column(scale=1, min_width=200):
+                                img_gpu_monitor = gr.Textbox(
+                                    lines=4,
+                                    container=False,
+                                    interactive=False,
+                                    elem_classes="monitor-compact"
+                                )
+                            with gr.Column(scale=1, min_width=200):
+                                img_cpu_monitor = gr.Textbox(
+                                    lines=2,
+                                    container=False,
+                                    interactive=False,
+                                    elem_classes="monitor-compact"
+                                )
+                
+                # --- Advanced Options (mirroring FlashVSR exactly) ---
+                with gr.Row():
+                    with gr.Accordion("Advanced Options", open=False):
+                        with gr.Row():
+                            with gr.Column(scale=1):
+                                img_sparse_ratio = gr.Slider(
+                                    minimum=0.5, maximum=5.0, step=0.1, value=2.0, 
+                                    label="Sparse Ratio", 
+                                    info="Controls attention sparsity. 1.5 = faster inference, 2.0 = more stable output"
+                                )
+                                img_local_range = gr.Slider(
+                                    minimum=3, maximum=15, step=2, value=11, 
+                                    label="Local Range", 
+                                    info="Temporal attention window. 9 = sharper details, 11 = smoother/more stable"
+                                )
+                                img_quality = gr.Slider(
+                                    minimum=1, maximum=10, step=1, value=5, 
+                                    label="Output Image Quality", 
+                                    info="Higher = better quality, larger files. 5 = balanced, 8+ = near-lossless (huge files)"
+                                )
+                            with gr.Column(scale=1):
+                                img_kv_ratio = gr.Slider(
+                                    minimum=1, maximum=8, step=1, value=3, 
+                                    label="KV Cache Ratio", 
+                                    info="Temporal consistency. Higher = less flicker, more VRAM. 3-4 is usually optimal"
+                                )
+                                img_fps = gr.Number(
+                                    value=30, 
+                                    label="Output FPS", 
+                                    precision=0, 
+                                    info="(Unused for images)",
+                                    visible=False
+                                )
+                                img_device = gr.Textbox(
+                                    value="auto", 
+                                    label="Device", 
+                                    info="'auto', 'cuda:0', 'cuda:1', or 'cpu'"
+                                )
+                        with gr.Row():
+                            with gr.Column(scale=1):
+                                img_attention_mode = gr.Radio(
+                                    choices=["sage", "block"], 
+                                    value="sage", 
+                                    label="Attention Mode", 
+                                    info="'sage' = default (recommended), 'block' = alternative attention pattern"
+                                )
+                                img_dtype = gr.Radio(
+                                    choices=["fp16", "bf16"], 
+                                    value="bf16", 
+                                    label="Data Type", 
+                                    info="bf16 = better stability (recommended), fp16 = slightly faster on some GPUs"
+                                )
+                            with gr.Column(scale=1):
+                                img_color_fix = gr.Checkbox(
+                                    label="Enable Color Fix", 
+                                    value=True, 
+                                    info="Corrects color shifts during upscaling"
+                                )
+                                img_tiled_vae = gr.Checkbox(
+                                    label="Enable Tiled VAE", 
+                                    value=True, 
+                                    info="Reduces VRAM usage during decoding (slight speed cost)"
+                                )
+                                img_unload_dit = gr.Checkbox(
+                                    label="Unload DiT Before Decoding", 
+                                    value=False, 
+                                    info="Frees VRAM before VAE decode (slower but saves memory)"
+                                )
+                
+                # --- Image Comparison (placeholder for ImageSlider) ---
+                with gr.Row():
+                    img_comparison = gr.ImageSlider(
+                        label="Before/After Comparison",
+                        interactive=False,
+                        elem_classes="image-window"
+                    )
+                
+                # Hidden state for file path
+                img_output_path = gr.State(None)
+                
+                # Toggle tiled DiT settings visibility
+                img_tiled_dit.change(
+                    fn=lambda x: gr.update(visible=x),
+                    inputs=[img_tiled_dit],
+                    outputs=[img_tiled_dit_options]
+                )
+                
+                # Image upload - analyze and update UI
+                def handle_image_change(image_path):
+                    if not image_path:
+                        return (
+                            '<div style="padding: 12px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px; color: #6c757d; text-align: center;">Upload image to see analysis</div>',
+                            0,
+                            0,
+                            gr.update(minimum=256, maximum=2048, value=512, interactive=False),
+                            '<div style="padding: 8px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; color: #6c757d; font-size: 0.9em; text-align: center;">Upload image to enable resize</div>'
+                        )
+                    
+                    # Analyze the image
+                    html, width, height = analyze_input_image(image_path)
+                    
+                    # Update resize slider based on image width
+                    slider_max = min(width, 2048) if width > 0 else 2048
+                    slider_value = max(256, min(512, slider_max))
+                    resize_slider_update = gr.update(minimum=256, maximum=slider_max, value=slider_value, interactive=True)
+                    
+                    # Update resize preview
+                    resize_preview = preview_image_resize(image_path, slider_value)
+                    
+                    return html, width, height, resize_slider_update, resize_preview
+                
+                img_input.change(
+                    fn=handle_image_change,
+                    inputs=[img_input],
+                    outputs=[img_analysis_html, img_current_width, img_current_height, img_resize_max_width_slider, img_resize_preview_html]
+                )
+                
+                # Update resize preview when slider changes
+                img_resize_max_width_slider.change(
+                    fn=preview_image_resize,
+                    inputs=[img_input, img_resize_max_width_slider],
+                    outputs=[img_resize_preview_html]
+                )
+                
+                # Resize button click
+                img_resize_button.click(
+                    fn=resize_input_image,
+                    inputs=[img_input, img_resize_max_width_slider],
+                    outputs=[img_input]
+                )
+                
+                # Single image run button click
+                img_run_button.click(
+                    fn=run_flashvsr_image,
+                    inputs=[
+                        img_input, img_mode, img_model_version, img_scale, img_color_fix,
+                        img_tiled_vae, img_tiled_dit, img_tile_size, img_tile_overlap,
+                        img_unload_dit, img_dtype, img_seed, img_device, img_fps,
+                        img_quality, img_attention_mode, img_sparse_ratio, img_kv_ratio,
+                        img_local_range, img_autosave, img_create_comparison
+                    ],
+                    outputs=[img_output, img_output_path, img_comparison]
+                )
+                
+                # Batch image run button click
+                img_batch_run_button.click(
+                    fn=run_flashvsr_batch_image,
+                    inputs=[
+                        img_batch_input_files, img_mode, img_model_version, img_scale, img_color_fix,
+                        img_tiled_vae, img_tiled_dit, img_tile_size, img_tile_overlap,
+                        img_unload_dit, img_dtype, img_seed, img_device, img_fps,
+                        img_quality, img_attention_mode, img_sparse_ratio, img_kv_ratio,
+                        img_local_range, img_create_comparison
+                    ],
+                    outputs=[img_output, img_batch_status]
+                )
+                
+                # Save button click
+                img_save_button.click(
+                    fn=save_file_manually,
+                    inputs=[img_output_path],
+                    outputs=[img_save_status]
+                )
+                
+                # Open folder button
+                img_open_folder_button.click(
+                    fn=lambda: os.startfile(OUTPUT_DIR) if os.name == 'nt' else os.system(f'open "{OUTPUT_DIR}"' if os.name == 'darwin' else f'xdg-open "{OUTPUT_DIR}"'),
+                    inputs=[],
+                    outputs=[]
+                )
+            
             # --- TOOLBOX TAB ---
-            with gr.TabItem("🛠️ Toolbox", id=1):
+            with gr.TabItem("🛠️ Toolbox", id=2):
                 with gr.Row():
                     # --- Left Column: Inputs and Pipeline Control ---
                     with gr.Column(scale=1):
@@ -2489,10 +3235,12 @@ def create_ui():
         )
 
         def update_monitor():
-            return SystemMonitor.get_system_info()
+            gpu_info, cpu_info = SystemMonitor.get_system_info()
+            # Return same info for both video and image tabs
+            return gpu_info, cpu_info, gpu_info, cpu_info
             
         monitor_timer = gr.Timer(2, active=True)
-        monitor_timer.tick(fn=update_monitor, outputs=[gpu_monitor, cpu_monitor]) 
+        monitor_timer.tick(fn=update_monitor, outputs=[gpu_monitor, cpu_monitor, img_gpu_monitor, img_cpu_monitor]) 
         
         def send_to_toolbox(video_path):
             if not video_path:
