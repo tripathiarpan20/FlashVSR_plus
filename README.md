@@ -1,3 +1,9 @@
+Enhanced Fork for the Pinokio Community. Will update README later. 
+
+---
+Original lihaoyun6 README below:
+---
+
 # ⚡ FlashVSR+
 
 **Optimized inference pipeline based on [FlashVSR](https://github.com/OpenImagingLab/FlashVSR) project**
