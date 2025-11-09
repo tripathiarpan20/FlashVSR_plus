@@ -145,6 +145,40 @@ def list_images_natural(folder: str):
     fs.sort(key=natural_key)
     return fs
 
+def clean_image_filename(filename, max_length=20):
+    """
+    Cleans and truncates image filenames to prevent path length issues.
+    - Removes preprocessing suffixes (_resized_, _preprocessed_, etc.)
+    - Removes timestamps from preprocessing steps
+    - Truncates to max_length characters
+    """
+    # Remove preprocessing suffixes that accumulate
+    preprocessing_patterns = [
+        r'_resized_\d+x\d+',  # _resized_320x210
+        r'_preprocessed',
+        r'_input_upscaled',
+        r'_input_resized',
+    ]
+    
+    for pattern in preprocessing_patterns:
+        filename = re.sub(pattern, '', filename)
+    
+    # Remove timestamps from preprocessing (format: _YYYYMMDD_HHMMSS)
+    filename = re.sub(r'_\d{8}_\d{6}', '', filename)
+    
+    # Clean up multiple underscores
+    filename = re.sub(r'_+', '_', filename)
+    filename = filename.strip('_')
+    
+    # Truncate to max_length while preserving some readability
+    if len(filename) > max_length:
+        # Keep the first max_length characters
+        filename = filename[:max_length]
+        # Remove trailing underscore if present
+        filename = filename.rstrip('_')
+    
+    return filename
+
 def largest_8n1_leq(n):
     # Find largest value of form 8n+1 that is <= n
     return 0 if n < 1 else ((n - 1)//8)*8 + 1
@@ -200,10 +234,11 @@ def get_input_params(image_tensor, scale):
     scaled_w = w0 * scale
     scaled_h = h0 * scale
     
-    # Round to nearest multiple of 128 to minimize padding while preserving aspect ratio
+    # Round UP to nearest multiple of 128 to ensure we never have negative padding
     # This adds small black borders instead of distorting the image
-    tW = round(scaled_w / multiple) * multiple
-    tH = round(scaled_h / multiple) * multiple
+    import math
+    tW = math.ceil(scaled_w / multiple) * multiple
+    tH = math.ceil(scaled_h / multiple) * multiple
     
     # Ensure minimum size
     tW = max(multiple, tW)
@@ -632,11 +667,16 @@ def run_flashvsr_single(
         progress(0.1, desc="Initializing model pipeline...")
         pipe = init_pipeline(mode, _device, dtype, model_version=model_version)
         tile_coords = calculate_tile_coords(H, W, tile_size, tile_overlap)
+        num_tiles = len(tile_coords)
 
         if mode == "tiny-long":
             local_temp_dir = os.path.join(TEMP_DIR, str(uuid.uuid4())); os.makedirs(local_temp_dir, exist_ok=True)
             temp_videos = []
-            for i in tqdm(range(len(tile_coords)), desc="[FlashVSR] Processing tiles"):
+            for i in tqdm(range(num_tiles), desc="[FlashVSR] Processing tiles"):
+                # Update progress: 10% to 85% range for tile processing
+                tile_progress = 0.1 + (i / num_tiles) * 0.75
+                progress(tile_progress, desc=f"Processing tiles: {i+1}/{num_tiles}")
+                
                 x1, y1, x2, y2 = tile_coords[i]
                 input_tile = frames[:, y1:y2, x1:x2, :]
                 temp_name = os.path.join(local_temp_dir, f"{i+1:05d}.mp4")
@@ -649,6 +689,7 @@ def run_flashvsr_single(
                 )
                 temp_videos.append(temp_name); del LQ_tile, input_tile; clean_vram()
 
+            progress(0.85, desc="Stitching tiles...")
             stitch_video_tiles(temp_videos, tile_coords, (W*scale, H*scale), scale, tile_overlap, temp_video_path, _fps, quality, True)
             shutil.rmtree(local_temp_dir)
         else: # Stitch in memory
@@ -661,7 +702,11 @@ def run_flashvsr_single(
             final_output_canvas = torch.zeros((num_aligned_frames, expected_H, expected_W, C), dtype=torch.float32)
             weight_sum_canvas = torch.zeros((num_aligned_frames, expected_H, expected_W, C), dtype=torch.float32)
             
-            for i in tqdm(range(len(tile_coords)), desc="[FlashVSR] Processing tiles"):
+            for i in tqdm(range(num_tiles), desc="[FlashVSR] Processing tiles"):
+                # Update progress: 10% to 85% range for tile processing
+                tile_progress = 0.1 + (i / num_tiles) * 0.75
+                progress(tile_progress, desc=f"Processing tiles: {i+1}/{num_tiles}")
+                
                 x1, y1, x2, y2 = tile_coords[i]
                 input_tile = frames[:, y1:y2, x1:x2, :]
                 tile_h_in, tile_w_in = y2 - y1, x2 - x1
@@ -744,8 +789,10 @@ def run_flashvsr_single(
         pipe = init_pipeline(mode, _device, dtype, model_version=model_version)
         log(f"Processing {frames.shape[0]} frames...", message_type='info')
 
+        N, H, W, C = frames.shape
         th, tw, F = get_input_params(frames, scale)
         if mode == "tiny-long":
+            progress(0.2, desc="Processing video...")
             LQ = input_tensor_generator(frames, _device, scale=scale, dtype=dtype)
             pipe(
                 LQ_video=LQ, num_frames=F, height=th, width=tw,
@@ -753,15 +800,31 @@ def run_flashvsr_single(
                 output_path=temp_video_path, quality=quality, **pipe_kwargs
             )
         else:
+            progress(0.2, desc="Processing video...")
             LQ, _, _, _ = prepare_input_tensor(frames, _device, scale=scale, dtype=dtype)
             LQ = LQ.to(_device)
+            progress(0.3, desc="Running model inference...")
             video = pipe(
                 LQ_video=LQ, num_frames=F, height=th, width=tw,
                 topk_ratio=sparse_ratio*768*1280/(th*tw), **pipe_kwargs
             )
+            progress(0.8, desc="Converting output...")
             final_output_tensor = tensor2video(video).cpu()
             # Trim to match input frame count
             final_output_tensor = final_output_tensor[:frames.shape[0]]
+            
+            # Crop padding to match exact scaled dimensions (same as tiled mode)
+            target_h = H * scale
+            target_w = W * scale
+            output_h, output_w = final_output_tensor.shape[1], final_output_tensor.shape[2]
+            
+            if output_h > target_h or output_w > target_w:
+                # Center crop to remove padding
+                crop_top = (output_h - target_h) // 2
+                crop_left = (output_w - target_w) // 2
+                final_output_tensor = final_output_tensor[:, crop_top:crop_top+target_h, crop_left:crop_left+target_w, :]
+                log(f"Cropped padding: {output_h}x{output_w} → {target_h}x{target_w}", message_type='info')
+            
             del video  # Free the original video tensor
         del pipe; clean_vram()
 
@@ -865,7 +928,7 @@ def analyze_input_image(image_path):
                 </div>
             </div>
             <div style="font-size: 0.8em; color: #666; text-align: center; margin-top: 8px;">
-                ℹ️ Output dimensions are padded to multiples of 128 (model requirement). Small black borders may appear to preserve aspect ratio.
+                ℹ️ Output maintains exact aspect ratio. Padding is automatically removed during processing.
             </div>
         </div>
         '''
@@ -1151,13 +1214,33 @@ def run_flashvsr_image(
                     middle_frame = frame
                     break
         
-        # Save the extracted frame as an image
+        # Get original image dimensions to crop padding
+        input_img = Image.open(image_path).convert('RGB')
+        orig_w, orig_h = input_img.size
+        target_w = orig_w * scale
+        target_h = orig_h * scale
+        
+        # Convert frame to PIL and crop padding if present
+        output_img = Image.fromarray(middle_frame)
+        output_w, output_h = output_img.size
+        
+        if output_w > target_w or output_h > target_h:
+            # Center crop to remove padding
+            crop_left = (output_w - target_w) // 2
+            crop_top = (output_h - target_h) // 2
+            crop_right = crop_left + target_w
+            crop_bottom = crop_top + target_h
+            output_img = output_img.crop((crop_left, crop_top, crop_right, crop_bottom))
+            log(f"Cropped padding from image: {output_w}x{output_h} → {target_w}x{target_h}", message_type='info')
+        
+        # Save the cropped image with cleaned filename
         input_basename = os.path.splitext(os.path.basename(image_path))[0]
+        clean_basename = clean_image_filename(input_basename, max_length=20)
         timestamp = time.strftime("%Y%m%d-%H%M%S")
-        output_filename = f"{input_basename}_{mode}_s{scale}_{timestamp}.png"
+        output_filename = f"{clean_basename}_{mode}_s{scale}_{timestamp}.png"
         temp_image_path = os.path.join(TEMP_DIR, output_filename)
         
-        Image.fromarray(middle_frame).save(temp_image_path)
+        output_img.save(temp_image_path)
         
         # Autosave if enabled (to images subfolder)
         if autosave:
@@ -1173,33 +1256,30 @@ def run_flashvsr_image(
         
         # Prepare images for ImageSlider (before/after tuple)
         try:
-            input_img = Image.open(image_path).convert('RGB')
-            output_img = Image.open(temp_image_path).convert('RGB')
+            # Upscale input to match output for proper comparison (no stretching)
+            input_upscaled = input_img.resize((target_w, target_h), Image.LANCZOS)
             
-            # Resize input to match output for comparison
-            input_resized = input_img.resize(output_img.size, Image.LANCZOS)
-            
-            # Save resized input for ImageSlider
-            input_resized_filename = f"{input_basename}_input_resized_{timestamp}.png"
-            input_resized_path = os.path.join(TEMP_DIR, input_resized_filename)
-            input_resized.save(input_resized_path)
+            # Save upscaled input for ImageSlider with short filename
+            input_upscaled_filename = f"{clean_basename}_input_{timestamp}.png"
+            input_upscaled_path = os.path.join(TEMP_DIR, input_upscaled_filename)
+            input_upscaled.save(input_upscaled_path)
             
             # ImageSlider expects tuple of (before, after) paths
-            comparison_tuple = (input_resized_path, temp_image_path)
+            comparison_tuple = (input_upscaled_path, temp_image_path)
             
             # Create stitched side-by-side comparison if requested
             if create_comparison:
                 log("Creating side-by-side comparison image...", message_type="info")
-                comparison_width = input_resized.width + output_img.width
-                comparison_height = max(input_resized.height, output_img.height)
+                comparison_width = input_upscaled.width + output_img.width
+                comparison_height = max(input_upscaled.height, output_img.height)
                 comparison_img = Image.new('RGB', (comparison_width, comparison_height))
-                comparison_img.paste(input_resized, (0, 0))
-                comparison_img.paste(output_img, (input_resized.width, 0))
+                comparison_img.paste(input_upscaled, (0, 0))
+                comparison_img.paste(output_img, (input_upscaled.width, 0))
                 
-                # Save stitched comparison (always saved to images subfolder)
+                # Save stitched comparison (always saved to images subfolder) with cleaned filename
                 images_output_dir = os.path.join(OUTPUT_DIR, "images")
                 os.makedirs(images_output_dir, exist_ok=True)
-                comparison_filename = f"{input_basename}_{mode}_s{scale}_comparison_{timestamp}.png"
+                comparison_filename = f"{clean_basename}_{mode}_s{scale}_comp_{timestamp}.png"
                 comparison_save_path = os.path.join(images_output_dir, comparison_filename)
                 comparison_img.save(comparison_save_path, quality=95)
                 log(f"Side-by-side comparison saved to: {comparison_save_path}", message_type="finish")
@@ -1404,7 +1484,7 @@ def analyze_input_video(video_path):
                 </div>
             </div>
             <div style="font-size: 0.8em; color: #666; text-align: center; margin-top: 8px;">
-                ℹ️ Output dimensions are padded to multiples of 128 (model requirement). Small black borders may appear to preserve aspect ratio.
+                ℹ️ Output maintains exact aspect ratio. Padding is automatically removed during processing.
             </div>
         </div>
         '''
@@ -1976,11 +2056,29 @@ def process_video_with_chunks(
     
     for i, chunk_path in enumerate(chunk_paths):
         chunk_progress_start = 0.1 + (i / num_chunks) * 0.8
+        chunk_progress_end = 0.1 + ((i + 1) / num_chunks) * 0.8
         
         log(f"Processing chunk {i+1}/{num_chunks}...", message_type="info")
         progress(chunk_progress_start, desc=f"Processing chunk {i+1}/{num_chunks}...")
         
         try:
+            # Create a custom progress wrapper that scales to the chunk's progress range
+            class ChunkProgress:
+                def __init__(self, parent_progress, start, end):
+                    self.parent_progress = parent_progress
+                    self.start = start
+                    self.end = end
+                
+                def __call__(self, value, desc=None):
+                    # Scale the 0-1 progress to the chunk's range
+                    scaled_value = self.start + (value * (self.end - self.start))
+                    if desc:
+                        self.parent_progress(scaled_value, desc=f"Chunk {i+1}/{num_chunks}: {desc}")
+                    else:
+                        self.parent_progress(scaled_value, desc=f"Processing chunk {i+1}/{num_chunks}...")
+            
+            chunk_progress = ChunkProgress(progress, chunk_progress_start, chunk_progress_end)
+            
             # Process this chunk using the main processing function
             # Seed is already fixed at the start, so all chunks use the same seed
             # Note: create_comparison=False for chunks (comparison only works on full video)
@@ -2006,7 +2104,7 @@ def process_video_with_chunks(
                 local_range=local_range,
                 autosave=False,
                 create_comparison=False,  # No comparison for individual chunks
-                progress=gr.Progress()
+                progress=chunk_progress
             )
             
             if output_path and os.path.exists(output_path):
@@ -2305,7 +2403,7 @@ def create_ui():
                                 seed_number = gr.Number(value=-1, label="Seed", precision=0, info="-1 = random")
                         with gr.Group():
                             with gr.Row():
-                                scale_slider = gr.Slider(minimum=2, maximum=4, step=1, value=2, label="Upscale Factor", info="Designed to upscale small/short AI video. Start with x2...")
+                                scale_slider = gr.Slider(minimum=2, maximum=4, step=1, value=2, label="Upscale Factor", info="Designed to upscale small/short AI video. Start with x2. Model was trained for x4.")
                                 tiled_dit_checkbox = gr.Checkbox(label="Enable Tiled DiT", info="Greatly reduces VRAM at the cost of speed.", value=True)
                             with gr.Row(visible=True) as tiled_dit_options:
                                 tile_size_slider = gr.Slider(
@@ -2523,7 +2621,7 @@ def create_ui():
                         
                         with gr.Group():
                             with gr.Row():
-                                img_scale = gr.Slider(minimum=2, maximum=4, step=1, value=2, label="Upscale Factor", info="Designed to upscale small/short AI video. Start with x2...")
+                                img_scale = gr.Slider(minimum=2, maximum=4, step=1, value=2, label="Upscale Factor", info="x4 gives greatly superior results. Use Resize Image in pre-processing above if vram/ram is a concern.")
                                 img_tiled_dit = gr.Checkbox(label="Enable Tiled DiT", info="Greatly reduces VRAM at the cost of speed.", value=True)
                             with gr.Row(visible=True) as img_tiled_dit_options:
                                 img_tile_size = gr.Slider(
