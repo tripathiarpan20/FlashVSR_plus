@@ -1,12 +1,13 @@
-This is a 1-click [Pinokio](https://pinokio.co/) install for [ai-anchorite/FlashVSR_plus](https://github.com/ai-anchorite/FlashVSR_plus)
+This repo has a [Pinokio](https://pinokio.co/) 1-click-installer available [here:](https://pinokio.co/item.html?uri=https%3A%2F%2Fgithub.com%2Fai-anchorite%2FFlashVSR_plus_pinokio&parent_frame=&theme=null)
+
+Installing outside of Pinokio will require ffmepg on PATH and self-installed pytorch. Torch install info can be seen [here:](https://github.com/ai-anchorite/FlashVSR_plus_pinokio/blob/main/torch.js)
 
 Forked from: [lihaoyun6/FlashVSR_plus](https://github.com/lihaoyun6/FlashVSR_plus)
 
 Original Project: [OpenImagingLab/FlashVSR](https://github.com/OpenImagingLab/FlashVSR )
 
 # FlashVSR: Efficient & High-Quality Video Super-Resolution
-A user-friendly fork of FlashVSR, enhanced and packaged for the Pinokio community. This version is optimized for consumer-grade hardware, enabling users with gaming PCs (12-16GB GPUs) to access powerful video and image upscaling without the demanding VRAM requirements of the original project.
-Provided as a 1-click installer for Pinokio, this project is designed for intuitive everyday use in the spirit of the open-source AI community.
+A user-friendly fork of FlashVSR, enhanced and packaged for the Pinokio community. This version is optimized for consumer-grade hardware, enabling users to access powerful video and image upscaling without the demanding VRAM requirements of the original project.
 
  <summary>Tab Screenshots</summary>
 <table>
@@ -32,10 +33,10 @@ Provided as a 1-click installer for Pinokio, this project is designed for intuit
 ## Project Background
 FlashVSR was generously released via [OpenImagingLab](https://github.com/OpenImagingLab/FlashVSR) to the open-source community. Their team's README is detailed below!
 
-This project builds upon the excellent fork [lihaoyun6/FlashVSR_plus](https://github.com/lihaoyun6/FlashVSR_plus), which introduced several key optimizations to the original FlashVSR project
+This project builds upon this excellent fork [lihaoyun6/FlashVSR_plus](https://github.com/lihaoyun6/FlashVSR_plus), which introduced several key optimizations to the original FlashVSR project
 
 ### Features from Upstream Fork
-The FlashVSR_plus fork laid the groundwork with the following notable enhancements:
+The FlashVSR_plus fork laid the groundwork with several notable enhancements, including:
 * Replaced Block-Sparse-Attention with Sparse_SageAttention.
 * Added DiT tiling and other memory optimizations to significantly reduce VRAM requirements.
 * Implemented the initial Gradio user interface.
@@ -43,11 +44,11 @@ The FlashVSR_plus fork laid the groundwork with the following notable enhancemen
 ## Enhancements in This Version
 This fork further refines the user experience and expands functionality with a focus on quality-of-life improvements and adds several new tools.
 
-* Enhanced Gradio UI: The interface has been redesigned for a more intuitive workflow, including dedicated tabs for different tasks.
-* Improved Memory Management and additional optimizations and internal fixes to ensure smooth operation on consumer hardware.
+* Enhanced Gradio UI: The interface has been redesigned for a more intuitive workflow, including dedicated tabs for additional tasks.
+* Improved Memory Management and optimizations and internal fixes to ensure smooth operation on consumer hardware.
 * Chunked Video Processing: Easily upscale longer videos without running into memory limitations.
 * Image Upscaling: A new feature that brings the power of FlashVSR to still images.
-* Post-Processing Toolbox: A suite of simple post-processing tools for RIFE frame interpolation, seamless video looping, and extra compression/export options.
+* Post-Processing Toolbox: A suite of useful post-processing tools for RIFE frame interpolation, seamless video looping, and extra compression/export options.
 
 
 # Original Project Details below: 
