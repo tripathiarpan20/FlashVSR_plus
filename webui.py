@@ -623,8 +623,7 @@ def run_flashvsr_single(
 ):
     if not input_path:
         log("No input video provided.", message_type='warning')
-        return None, None, None, gr.update(visible=False)
-    if seed == -1: seed = random.randint(0, 2**32 - 1)
+        return None, None, None
 
     # --- Parameter Preparation ---
     dtype_map = {"fp16": torch.float16, "bf16": torch.bfloat16}; dtype = dtype_map.get(dtype_str, torch.bfloat16)
@@ -871,16 +870,12 @@ def run_flashvsr_single(
     
     progress(1, desc="Done!")
     
-    # Generate output analysis
-    output_analysis = analyze_output_video(temp_output_path)
-    
     # Always display the upscaled output video (not the comparison)
     # This makes the manual save button behavior consistent
     return (
         temp_output_path,  # Display the upscaled output
         temp_output_path,  # Path for manual save
-        (input_path, temp_output_path),  # Video slider comparison
-        output_analysis  # Output analysis HTML
+        (input_path, temp_output_path)  # Video slider comparison
     )
 
 
@@ -1301,7 +1296,7 @@ def run_flashvsr_image(
             return None, None, None
         
         # Process through the video pipeline
-        video_output, save_path, slider_data, _ = run_flashvsr_single(
+        video_output, save_path, slider_data = run_flashvsr_single(
             input_path=temp_frames_dir,
             mode=mode,
             model_version=model_version,
@@ -1418,11 +1413,8 @@ def run_flashvsr_image(
             log(f"Could not create comparison: {e}", message_type="warning")
             comparison_tuple = None
         
-        # Generate output analysis
-        output_analysis = analyze_output_image(temp_image_path)
-        
-        # Return: output_image, output_path_for_save, comparison_tuple_for_slider, output_analysis
-        return temp_image_path, temp_image_path, comparison_tuple, output_analysis
+        # Return: output_image, output_path_for_save, comparison_tuple_for_slider
+        return temp_image_path, temp_image_path, comparison_tuple
         
     finally:
         # Cleanup temp frames directory
@@ -1491,7 +1483,7 @@ def run_flashvsr_batch(
             
             # Process the video using the single video function
             # Note: We pass autosave=False to prevent double-saving
-            temp_output_path, _, _, _ = run_flashvsr_single(
+            temp_output_path, _, _ = run_flashvsr_single(
                 input_path=video_path,
                 mode=mode,
                 model_version=model_version,
@@ -2164,10 +2156,8 @@ def process_video_with_chunks(
         log("No input video provided for chunk processing", message_type="error")
         return None, None, None, gr.update(visible=False)
     
-    # Generate seed once for all chunks to ensure consistency
-    if seed == -1:
-        seed = random.randint(0, 2**32 - 1)
-        log(f"Generated seed for chunk processing: {seed}", message_type="info")
+    # Log seed for chunk processing
+    log(f"Using seed for chunk processing: {seed}", message_type="info")
     
     # Step 1: Create chunks
     log(f"Starting chunk processing mode with {chunk_duration}s chunks...", message_type="info")
@@ -2215,7 +2205,7 @@ def process_video_with_chunks(
             # Process this chunk using the main processing function
             # Seed is already fixed at the start, so all chunks use the same seed
             # Note: create_comparison=False for chunks (comparison only works on full video)
-            output_path, _, _, _ = run_flashvsr_single(
+            output_path, _, _ = run_flashvsr_single(
                 input_path=chunk_path,
                 mode=mode,
                 model_version=model_version,
@@ -2539,7 +2529,8 @@ def create_ui():
                                     info="v1.1: Enhanced stability + fidelity (Nov 2025)"
                                 )
                             with gr.Row():
-                                seed_number = gr.Number(value=-1, label="Seed", precision=0, info="-1 = random")
+                                seed_number = gr.Number(value=0, label="Seed", precision=0, info="Seed for reproducible results")
+                                randomize_seed = gr.Checkbox(label="Randomize Seed", value=True, info="Generate new seed each run")
                         with gr.Group():
                             with gr.Row():
                                 scale_slider = gr.Slider(minimum=2, maximum=4, step=1, value=2, label="Upscale Factor", info="Designed to upscale small/short AI video. Start with x2. Model was trained for x4.")
@@ -2760,7 +2751,8 @@ def create_ui():
                                     info="v1.1: Enhanced stability + fidelity (Nov 2025)"
                                 )
                             with gr.Row():
-                                img_seed = gr.Number(value=-1, label="Seed", precision=0, info="-1 = random")
+                                img_seed = gr.Number(value=0, label="Seed", precision=0, info="Seed for reproducible results")
+                                img_randomize_seed = gr.Checkbox(label="Randomize Seed", value=True, info="Generate new seed each run")
                         
                         with gr.Group():
                             with gr.Row():
@@ -2923,7 +2915,8 @@ def create_ui():
                             0,
                             0,
                             gr.update(minimum=256, maximum=2048, value=512, interactive=False),
-                            '<div style="padding: 8px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; color: #6c757d; font-size: 0.9em; text-align: center;">Upload image to enable resize</div>'
+                            '<div style="padding: 8px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; color: #6c757d; font-size: 0.9em; text-align: center;">Upload image to enable resize</div>',
+                            gr.update(visible=False)  # Hide output analysis when input changes
                         )
                     
                     # Analyze the image
@@ -2937,12 +2930,13 @@ def create_ui():
                     # Update resize preview
                     resize_preview = preview_image_resize(image_path, slider_value)
                     
-                    return html, width, height, resize_slider_update, resize_preview
+                    # Hide output analysis when input changes
+                    return html, width, height, resize_slider_update, resize_preview, gr.update(visible=False)
                 
                 img_input.change(
                     fn=handle_image_change,
                     inputs=[img_input],
-                    outputs=[img_analysis_html, img_current_width, img_current_height, img_resize_max_width_slider, img_resize_preview_html]
+                    outputs=[img_analysis_html, img_current_width, img_current_height, img_resize_max_width_slider, img_resize_preview_html, img_output_analysis_html]
                 )
                 
                 # Update resize preview when slider changes
@@ -2960,7 +2954,21 @@ def create_ui():
                 )
                 
                 # Single image run button click
+                def should_randomize_img_seed(current_seed, randomize):
+                    """Generate a new random seed if randomize is checked, otherwise return current seed."""
+                    if randomize:
+                        return random.randint(0, 2**32 - 1)
+                    return current_seed
+                
                 img_run_button.click(
+                    fn=lambda: gr.update(visible=False),
+                    inputs=[],
+                    outputs=[img_output_analysis_html]
+                ).then(
+                    fn=should_randomize_img_seed,
+                    inputs=[img_seed, img_randomize_seed],
+                    outputs=[img_seed]
+                ).then(
                     fn=run_flashvsr_image,
                     inputs=[
                         img_input, img_mode, img_model_version, img_scale, img_color_fix,
@@ -2969,11 +2977,19 @@ def create_ui():
                         img_quality, img_attention_mode, img_sparse_ratio, img_kv_ratio,
                         img_local_range, img_autosave, img_create_comparison
                     ],
-                    outputs=[img_output, img_output_path, img_comparison, img_output_analysis_html]
+                    outputs=[img_output, img_output_path, img_comparison]
+                ).then(
+                    fn=analyze_output_image,
+                    inputs=[img_output_path],
+                    outputs=[img_output_analysis_html]
                 )
                 
                 # Batch image run button click
                 img_batch_run_button.click(
+                    fn=should_randomize_img_seed,
+                    inputs=[img_seed, img_randomize_seed],
+                    outputs=[img_seed]
+                ).then(
                     fn=run_flashvsr_batch_image,
                     inputs=[
                         img_batch_input_files, img_mode, img_model_version, img_scale, img_color_fix,
@@ -3293,14 +3309,16 @@ def create_ui():
                     # gr.update(maximum=60, value=0, interactive=False),
                     # gr.update(maximum=60, value=0, interactive=False),
                     '<div style="padding: 8px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; color: #6c757d; font-size: 0.9em; text-align: center;">Upload video to enable trim</div>',
-                    '<div style="padding: 6px; background: #d1ecf1; border: 1px solid #bee5eb; border-radius: 4px; color: #0c5460; font-size: 0.85em; text-align: center;">💡 Enable chunk processing for videos that exceed your available VRAM</div>'
+                    '<div style="padding: 6px; background: #d1ecf1; border: 1px solid #bee5eb; border-radius: 4px; color: #0c5460; font-size: 0.85em; text-align: center;">💡 Enable chunk processing for videos that exceed your available VRAM</div>',
+                    gr.update(visible=False)  # Hide output analysis when input changes
                 )
                 
             # Auto-analyze the video
             analysis_results = handle_analyze(video_path)
             # Update chunk preview
             chunk_preview = preview_chunk_processing(video_path, chunk_duration)
-            return analysis_results + (chunk_preview,)
+            # Hide output analysis when input changes
+            return analysis_results + (chunk_preview, gr.update(visible=False))
         
         input_video.change(
             fn=handle_video_change,
@@ -3315,7 +3333,8 @@ def create_ui():
                 trim_start_slider,
                 trim_end_slider,
                 trim_preview_html,
-                chunk_preview_display
+                chunk_preview_display,
+                video_output_analysis_html
             ]
         )
         
@@ -3417,7 +3436,21 @@ def create_ui():
                     attention_mode, sparse_ratio, kv_ratio, local_range, autosave, create_comparison
                 )
         
+        def should_randomize_seed(current_seed, randomize):
+            """Generate a new random seed if randomize is checked, otherwise return current seed."""
+            if randomize:
+                return random.randint(0, 2**32 - 1)
+            return current_seed
+        
         run_button.click(
+            fn=lambda: gr.update(visible=False),
+            inputs=[],
+            outputs=[video_output_analysis_html]
+        ).then(
+            fn=should_randomize_seed,
+            inputs=[seed_number, randomize_seed],
+            outputs=[seed_number]
+        ).then(
             fn=handle_processing,
             inputs=[
                 input_video, enable_chunk_processing, chunk_duration_slider,
@@ -3426,7 +3459,11 @@ def create_ui():
                 dtype_radio, seed_number, device_textbox, fps_number, quality_slider, attention_mode_radio,
                 sparse_ratio_slider, kv_ratio_slider, local_range_slider, autosave_checkbox, create_comparison_checkbox
             ],
-            outputs=[video_output, output_file_path, video_slider_output, video_output_analysis_html]
+            outputs=[video_output, output_file_path, video_slider_output]
+        ).then(
+            fn=analyze_output_video,
+            inputs=[output_file_path],
+            outputs=[video_output_analysis_html]
         )
         
         # Toggle chunk settings visibility and update preview
@@ -3464,12 +3501,18 @@ def create_ui():
                 unload_dit, dtype_str, seed, device, fps_override, quality, attention_mode,
                 sparse_ratio, kv_ratio, local_range
             )
-            # Generate output analysis for the last video
-            output_analysis = analyze_output_video(last_video) if last_video else gr.update(visible=False)
             # Return the last processed video for that final dramatic reveal!
-            return last_video, last_video, None, output_analysis
+            return last_video, last_video, None
         
         batch_run_button.click(
+            fn=lambda: gr.update(visible=False),
+            inputs=[],
+            outputs=[video_output_analysis_html]
+        ).then(
+            fn=should_randomize_seed,
+            inputs=[seed_number, randomize_seed],
+            outputs=[seed_number]
+        ).then(
             fn=handle_batch_processing,
             inputs=[
                 flashvsr_batch_input_files, mode_radio, model_version_radio, scale_slider, color_fix_checkbox, tiled_vae_checkbox,
@@ -3477,7 +3520,11 @@ def create_ui():
                 dtype_radio, seed_number, device_textbox, fps_number, quality_slider, attention_mode_radio,
                 sparse_ratio_slider, kv_ratio_slider, local_range_slider
             ],
-            outputs=[video_output, output_file_path, video_slider_output, video_output_analysis_html]
+            outputs=[video_output, output_file_path, video_slider_output]
+        ).then(
+            fn=analyze_output_video,
+            inputs=[output_file_path],
+            outputs=[video_output_analysis_html]
         )
 
         def update_monitor():
