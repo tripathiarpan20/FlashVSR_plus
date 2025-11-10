@@ -73,11 +73,15 @@ class ToolboxProcessor:
         """Opens the toolbox output folder in the system's file explorer."""
         folder_path = os.path.abspath(self.output_dir)
         try:
-            if sys.platform == "win32": os.startfile(folder_path)
-            elif sys.platform == "darwin": subprocess.Popen(["open", folder_path])
-            else: subprocess.Popen(["xdg-open", folder_path])
+            if sys.platform == "win32":
+                os.startfile(folder_path)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", folder_path])
+            else:
+                subprocess.Popen(["xdg-open", folder_path])
             return f"Opened output folder: {folder_path}"
-        except Exception as e: return f"❌ Error opening folder: {e}"
+        except Exception as e:
+            return f"❌ Error opening folder: {e}"
 
     def analyze_video(self, video_path):
         """Analyzes video file and returns detailed information."""

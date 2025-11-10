@@ -1207,7 +1207,7 @@ def run_flashvsr_batch_image(
                     return iterable
             
             # Process the image using the single image function
-            temp_output_path, _, _, _ = run_flashvsr_image(
+            temp_output_path, _, _ = run_flashvsr_image(
                 image_path=image_path,
                 mode=mode,
                 model_version=model_version,
@@ -2313,9 +2313,9 @@ def open_folder(folder_path):
         if sys.platform == "win32":
             os.startfile(folder_path)
         elif sys.platform == "darwin":
-            subprocess.run(["open", folder_path])
+            subprocess.Popen(["open", folder_path])
         else:
-            subprocess.run(["xdg-open", folder_path])
+            subprocess.Popen(["xdg-open", folder_path])
         return f'<div style="padding: 1px; background-color: #d4edda; border: 1px solid #c3e6cb; border-radius: 1px; color: #155724;">✅ Opened folder: {folder_path}</div>'
     except Exception as e:
         return f'<div style="padding: 1px; background-color: #f8d7da; border: 1px solid #f5c6cb; border-radius: 4px; color: #721c24;">❌ Error opening folder: {e}</div>'
@@ -2449,6 +2449,7 @@ def create_ui():
                                     label="Upload Multiple Videos for Batch Processing",
                                     file_count="multiple",
                                     type="filepath",
+                                    file_types=["video"],
                                     height="320px",                            
                                 )
                                 batch_run_button = gr.Button("Start Batch Processing", variant="primary", size="sm")
@@ -2579,7 +2580,7 @@ def create_ui():
                                 send_to_toolbox_btn = gr.Button("Send to Toolbox 🛠️", size="sm")                            
                             with gr.Row():
                                 config = load_config()
-                                autosave_checkbox = gr.Checkbox(label="Autosave Output", value=config.get("autosave", True))
+                                autosave_checkbox = gr.Checkbox(label="Autosave Output", value=config.get("autosave", True), info="Batched runs are _always_ saved to a subfolder.")
                                 create_comparison_checkbox = gr.Checkbox(label="Create Comparison Video", value=False, info="Side-by-side before/after. Always saved. Not available for chunked/batch jobs.")
                                 clear_on_start_checkbox = gr.Checkbox(label="Clear Temp on Start", value=config.get("clear_temp_on_start", False))
                             with gr.Row():                                
@@ -2704,6 +2705,7 @@ def create_ui():
                                     label="Upload Multiple Images for Batch Processing",
                                     file_count="multiple",
                                     type="filepath",
+                                    file_types=["image"],
                                     height="320px",
                                 )
                                 img_batch_run_button = gr.Button("Start Batch Processing", variant="primary", size="sm")
@@ -2740,7 +2742,7 @@ def create_ui():
                             img_current_width = gr.State(0)
                             img_current_height = gr.State(0)
                         
-                        # Main Settings (mirroring FlashVSR exactly)
+                        # Main Settings
                         with gr.Group():
                             with gr.Row():
                                 img_mode = gr.Radio(choices=["tiny", "full"], value="tiny", label="Pipeline Mode", info="'Full' requires 24GB(+) VRAM")
@@ -2756,7 +2758,7 @@ def create_ui():
                         
                         with gr.Group():
                             with gr.Row():
-                                img_scale = gr.Slider(minimum=2, maximum=4, step=1, value=2, label="Upscale Factor", info="x4 gives greatly superior results. Use Resize Image in pre-processing above if vram/ram is a concern.")
+                                img_scale = gr.Slider(minimum=2, maximum=4, step=1, value=2, label="Upscale Factor", info="Model was trained for x4 upscaling. Try using Resize Image in Pre-processing if vram/ram is a concern.")
                                 img_tiled_dit = gr.Checkbox(label="Enable Tiled DiT", info="Greatly reduces VRAM at the cost of speed.", value=True)
                             with gr.Row(visible=True) as img_tiled_dit_options:
                                 img_tile_size = gr.Slider(
@@ -2789,7 +2791,7 @@ def create_ui():
                             with gr.Row():
                                 img_save_button = gr.Button("Save Manually 💾", size="sm", variant="primary")
                             with gr.Row():
-                                img_autosave = gr.Checkbox(label="Autosave Output", value=config.get("autosave", True))
+                                img_autosave = gr.Checkbox(label="Autosave Output", value=config.get("autosave", True), info="Batched runs are _always_ saved to a subfolder.")
                                 img_create_comparison = gr.Checkbox(label="Create Comparison Image", value=False, info="Side-by-side before/after. Always saved.")
                                 img_clear_on_start = gr.Checkbox(label="Clear Temp on Start", value=config.get("clear_temp_on_start", False), visible=False)
                             with gr.Row():
@@ -2820,7 +2822,7 @@ def create_ui():
                         # Output Analysis Display
                         img_output_analysis_html = gr.HTML(visible=False)
                 
-                # --- Advanced Options (mirroring FlashVSR exactly) ---
+                # --- Advanced Options ---
                 with gr.Row():
                     with gr.Accordion("Advanced Options", open=False):
                         with gr.Row():
@@ -2889,7 +2891,7 @@ def create_ui():
                                     info="Frees VRAM before VAE decode (slower but saves memory)"
                                 )
                 
-                # --- Image Comparison (placeholder for ImageSlider) ---
+                # --- ImageSlider Comparison Window ---
                 with gr.Row():
                     img_comparison = gr.ImageSlider(
                         label="Before/After Comparison",
@@ -2897,124 +2899,7 @@ def create_ui():
                         elem_classes="image-window"
                     )
                 
-                # Hidden state for file path
-                img_output_path = gr.State(None)
-                
-                # Toggle tiled DiT settings visibility
-                img_tiled_dit.change(
-                    fn=lambda x: gr.update(visible=x),
-                    inputs=[img_tiled_dit],
-                    outputs=[img_tiled_dit_options]
-                )
-                
-                # Image upload - analyze and update UI
-                def handle_image_change(image_path):
-                    if not image_path:
-                        return (
-                            '<div style="padding: 12px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px; color: #6c757d; text-align: center;">Upload image to see analysis</div>',
-                            0,
-                            0,
-                            gr.update(minimum=256, maximum=2048, value=512, interactive=False),
-                            '<div style="padding: 8px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; color: #6c757d; font-size: 0.9em; text-align: center;">Upload image to enable resize</div>',
-                            gr.update(visible=False)  # Hide output analysis when input changes
-                        )
-                    
-                    # Analyze the image
-                    html, width, height = analyze_input_image(image_path)
-                    
-                    # Update resize slider based on image width
-                    slider_max = min(width, 2048) if width > 0 else 2048
-                    slider_value = max(256, min(512, slider_max))
-                    resize_slider_update = gr.update(minimum=256, maximum=slider_max, value=slider_value, interactive=True)
-                    
-                    # Update resize preview
-                    resize_preview = preview_image_resize(image_path, slider_value)
-                    
-                    # Hide output analysis when input changes
-                    return html, width, height, resize_slider_update, resize_preview, gr.update(visible=False)
-                
-                img_input.change(
-                    fn=handle_image_change,
-                    inputs=[img_input],
-                    outputs=[img_analysis_html, img_current_width, img_current_height, img_resize_max_width_slider, img_resize_preview_html, img_output_analysis_html]
-                )
-                
-                # Update resize preview when slider changes
-                img_resize_max_width_slider.change(
-                    fn=preview_image_resize,
-                    inputs=[img_input, img_resize_max_width_slider],
-                    outputs=[img_resize_preview_html]
-                )
-                
-                # Resize button click
-                img_resize_button.click(
-                    fn=resize_input_image,
-                    inputs=[img_input, img_resize_max_width_slider],
-                    outputs=[img_input]
-                )
-                
-                # Single image run button click
-                def should_randomize_img_seed(current_seed, randomize):
-                    """Generate a new random seed if randomize is checked, otherwise return current seed."""
-                    if randomize:
-                        return random.randint(0, 2**32 - 1)
-                    return current_seed
-                
-                img_run_button.click(
-                    fn=lambda: gr.update(visible=False),
-                    inputs=[],
-                    outputs=[img_output_analysis_html]
-                ).then(
-                    fn=should_randomize_img_seed,
-                    inputs=[img_seed, img_randomize_seed],
-                    outputs=[img_seed]
-                ).then(
-                    fn=run_flashvsr_image,
-                    inputs=[
-                        img_input, img_mode, img_model_version, img_scale, img_color_fix,
-                        img_tiled_vae, img_tiled_dit, img_tile_size, img_tile_overlap,
-                        img_unload_dit, img_dtype, img_seed, img_device, img_fps,
-                        img_quality, img_attention_mode, img_sparse_ratio, img_kv_ratio,
-                        img_local_range, img_autosave, img_create_comparison
-                    ],
-                    outputs=[img_output, img_output_path, img_comparison]
-                ).then(
-                    fn=analyze_output_image,
-                    inputs=[img_output_path],
-                    outputs=[img_output_analysis_html]
-                )
-                
-                # Batch image run button click
-                img_batch_run_button.click(
-                    fn=should_randomize_img_seed,
-                    inputs=[img_seed, img_randomize_seed],
-                    outputs=[img_seed]
-                ).then(
-                    fn=run_flashvsr_batch_image,
-                    inputs=[
-                        img_batch_input_files, img_mode, img_model_version, img_scale, img_color_fix,
-                        img_tiled_vae, img_tiled_dit, img_tile_size, img_tile_overlap,
-                        img_unload_dit, img_dtype, img_seed, img_device, img_fps,
-                        img_quality, img_attention_mode, img_sparse_ratio, img_kv_ratio,
-                        img_local_range, img_create_comparison
-                    ],
-                    outputs=[img_output, img_batch_status]
-                )
-                
-                # Save button click
-                img_save_button.click(
-                    fn=save_file_manually,
-                    inputs=[img_output_path],
-                    outputs=[img_save_status]
-                )
-                
-                # Open folder button
-                img_open_folder_button.click(
-                    fn=lambda: os.startfile(OUTPUT_DIR) if os.name == 'nt' else os.system(f'open "{OUTPUT_DIR}"' if os.name == 'darwin' else f'xdg-open "{OUTPUT_DIR}"'),
-                    inputs=[],
-                    outputs=[]
-                )
-            
+
             # --- TOOLBOX TAB ---
             with gr.TabItem("🛠️ Toolbox", id=2):
                 with gr.Row():
@@ -3031,6 +2916,7 @@ def create_ui():
                                     label="Upload Multiple Videos for Batch Processing",
                                     file_count="multiple",
                                     type="filepath",
+                                    file_types=["video"],
                                     height="300px",                            
                                 )
                             tb_start_pipeline_btn = gr.Button("🚀 Start Pipeline Processing", variant="primary", size="sm")                              
@@ -3557,6 +3443,180 @@ def create_ui():
             show_progress="hidden"
         )        
 
+        # --- Image Tab Handlers ---
+
+        # Hidden state for file path
+        img_output_path = gr.State(None)
+        
+        # Toggle tiled DiT settings visibility
+        img_tiled_dit.change(
+            fn=lambda x: gr.update(visible=x),
+            inputs=[img_tiled_dit],
+            outputs=[img_tiled_dit_options]
+        )
+        
+        # Image upload - analyze and update UI
+        def handle_image_change(image_path):
+            if not image_path:
+                return (
+                    '<div style="padding: 12px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px; color: #6c757d; text-align: center;">Upload image to see analysis</div>',
+                    0,
+                    0,
+                    gr.update(minimum=256, maximum=2048, value=512, interactive=False),
+                    '<div style="padding: 8px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; color: #6c757d; font-size: 0.9em; text-align: center;">Upload image to enable resize</div>',
+                    gr.update(visible=False)  # Hide output analysis when input changes
+                )
+            
+            # Analyze the image
+            html, width, height = analyze_input_image(image_path)
+            
+            # Update resize slider based on image width
+            slider_max = min(width, 2048) if width > 0 else 2048
+            slider_value = max(256, min(512, slider_max))
+            resize_slider_update = gr.update(minimum=256, maximum=slider_max, value=slider_value, interactive=True)
+            
+            # Update resize preview
+            resize_preview = preview_image_resize(image_path, slider_value)
+            
+            # Hide output analysis when input changes
+            return html, width, height, resize_slider_update, resize_preview, gr.update(visible=False)
+        
+        img_input.change(
+            fn=handle_image_change,
+            inputs=[img_input],
+            outputs=[img_analysis_html, img_current_width, img_current_height, img_resize_max_width_slider, img_resize_preview_html, img_output_analysis_html]
+        )
+        
+        # Update resize preview when slider changes
+        img_resize_max_width_slider.change(
+            fn=preview_image_resize,
+            inputs=[img_input, img_resize_max_width_slider],
+            outputs=[img_resize_preview_html]
+        )
+        
+        # Resize button click
+        img_resize_button.click(
+            fn=resize_input_image,
+            inputs=[img_input, img_resize_max_width_slider],
+            outputs=[img_input]
+        )
+        
+        # Single image run button click
+        def should_randomize_img_seed(img_seed, img_randomize_seed):
+            """Generate a new random seed if randomize is checked, otherwise return current seed."""
+            if img_randomize_seed:
+                return random.randint(0, 2**32 - 1)
+            return img_seed
+        
+        img_run_button.click(
+            fn=lambda: gr.update(visible=False),
+            inputs=[],
+            outputs=[img_output_analysis_html]
+        ).then(
+            fn=should_randomize_img_seed,
+            inputs=[img_seed, img_randomize_seed],
+            outputs=[img_seed]
+        ).then(
+            fn=run_flashvsr_image,
+            inputs=[
+                img_input, img_mode, img_model_version, img_scale, img_color_fix,
+                img_tiled_vae, img_tiled_dit, img_tile_size, img_tile_overlap,
+                img_unload_dit, img_dtype, img_seed, img_device, img_fps,
+                img_quality, img_attention_mode, img_sparse_ratio, img_kv_ratio,
+                img_local_range, img_autosave, img_create_comparison
+            ],
+            outputs=[img_output, img_output_path, img_comparison]
+        ).then(
+            fn=analyze_output_image,
+            inputs=[img_output_path],
+            outputs=[img_output_analysis_html]
+        )
+        
+        # Batch image run button click
+        img_batch_run_button.click(
+            fn=should_randomize_img_seed,
+            inputs=[img_seed, img_randomize_seed],
+            outputs=[img_seed]
+        ).then(
+            fn=run_flashvsr_batch_image,
+            inputs=[
+                img_batch_input_files, img_mode, img_model_version, img_scale, img_color_fix,
+                img_tiled_vae, img_tiled_dit, img_tile_size, img_tile_overlap,
+                img_unload_dit, img_dtype, img_seed, img_device, img_fps,
+                img_quality, img_attention_mode, img_sparse_ratio, img_kv_ratio,
+                img_local_range, img_create_comparison
+            ],
+            outputs=[img_output, img_batch_status]
+        )
+        
+        # Save button click
+        img_save_button.click(
+            fn=save_file_manually,
+            inputs=[img_output_path],
+            outputs=[img_save_status]
+        ).then(
+            fn=do_sleep,
+            inputs=None,
+            outputs=None,
+            show_progress="hidden"
+        ).then(
+            fn=do_clear,
+            inputs=None,
+            outputs=[img_save_status],
+            show_progress="hidden"
+        )
+        
+        # Open folder button
+        def open_images_folder():
+            images_folder = os.path.join(OUTPUT_DIR, "images")
+            os.makedirs(images_folder, exist_ok=True)
+            if sys.platform == "win32":
+                os.startfile(images_folder)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", images_folder])
+            else:
+                subprocess.Popen(["xdg-open", images_folder])
+        
+        img_open_folder_button.click(
+            fn=open_images_folder,
+            inputs=[],
+            outputs=[]
+        )
+        
+        # Autosave checkbox change handler
+        img_autosave.change(
+            fn=update_autosave_config,
+            inputs=[img_autosave],
+            outputs=[img_save_status]
+        ).then(
+            fn=do_sleep,
+            inputs=None,
+            outputs=None,
+            show_progress="hidden"
+        ).then(
+            fn=do_clear,
+            inputs=None,
+            outputs=[img_save_status],
+            show_progress="hidden"
+        )
+        
+        # Clear on start checkbox change handler
+        img_clear_on_start.change(
+            fn=update_clear_on_start_config,
+            inputs=[img_clear_on_start],
+            outputs=[img_save_status]
+        ).then(
+            fn=do_sleep,
+            inputs=None,
+            outputs=None,
+            show_progress="hidden"
+        ).then(
+            fn=do_clear,
+            inputs=None,
+            outputs=[img_save_status],
+            show_progress="hidden"
+        )
+
         # --- Toolbox Tab Handlers ---
         
         tb_open_folder_btn.click(
@@ -3654,11 +3714,6 @@ def create_ui():
             fn=handle_manual_save,
             inputs=[processed_video], # Takes input directly from the video player
             outputs=[tb_status_message]  # Only needs to update the status message
-        )
-
-        tb_open_folder_btn.click(
-            fn=toolbox_processor.open_output_folder, 
-            outputs=[tb_status_message]
         )
 
         # Track which input tab is active (Single vs Batch)
