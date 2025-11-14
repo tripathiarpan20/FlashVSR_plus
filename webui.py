@@ -1218,7 +1218,7 @@ def resize_input_image(image_path, max_width, progress=gr.Progress()):
 
 
 def run_flashvsr_batch_image(
-    batch_files,
+    input_paths,
     mode,
     model_version,
     scale,
@@ -1241,12 +1241,10 @@ def run_flashvsr_batch_image(
     progress=gr.Progress(track_tqdm=True)
 ):
     """Processes a batch of images through FlashVSR, saving all to a timestamped subfolder."""
-    if not batch_files:
+    if not input_paths:
         log("No files provided for batch image processing.", message_type='warning')
-        return None, "⚠️ No files provided for batch processing."
+        return None, "⚠️ No files provided for batch processing.", None
     
-    # Extract file paths from the uploaded files
-    input_paths = [file.name if hasattr(file, 'name') else file for file in batch_files]
     total_images = len(input_paths)
     
     log(f"Starting batch processing for {total_images} images...", message_type='info')
@@ -1498,7 +1496,7 @@ def run_flashvsr_image(
                 log(f"Warning: Could not clean up temp frames: {e}", message_type="warning")
 
 def run_flashvsr_batch(
-    batch_files,
+    input_paths,
     mode,
     model_version,
     scale,
@@ -1520,12 +1518,10 @@ def run_flashvsr_batch(
     progress=gr.Progress(track_tqdm=True)
 ):
     """Processes a batch of videos through FlashVSR, saving all to a timestamped subfolder."""
-    if not batch_files:
+    if not input_paths:
         log("No files provided for batch processing.", message_type='warning')
         return None, "⚠️ No files provided for batch processing."
     
-    # Extract file paths from the uploaded files
-    input_paths = [file.name if hasattr(file, 'name') else file for file in batch_files]
     total_videos = len(input_paths)
     
     log(f"Starting batch processing for {total_videos} videos...", message_type='info')
@@ -2403,7 +2399,7 @@ def save_file(file_path):
         log(f"File not found or unable to save.", message_type="error")
 
 def handle_start_pipeline(
-    active_tab_index, single_video_path, batch_video_paths, selected_ops,
+    active_tab_index, single_video_path, batch_video_paths, batch_folder_path, selected_ops,
     # Frame Adjust params
     fps_mode, speed_factor, frames_use_streaming, frames_quality,
     # Video Loop params
@@ -2413,14 +2409,23 @@ def handle_start_pipeline(
     progress=gr.Progress()
 ):
     # Determine input paths based on the active tab
-    if active_tab_index == 1 and batch_video_paths:
-        input_paths = [file.name for file in batch_video_paths]
+    if active_tab_index == 1:
+        # Batch mode - check folder path first, then files
+        input_paths = []
+        if batch_folder_path and os.path.isdir(batch_folder_path):
+            video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.m4v']
+            input_paths = [str(f) for f in Path(batch_folder_path).iterdir() 
+                          if f.is_file() and f.suffix.lower() in video_extensions]
+            input_paths.sort()  # Sort for consistent ordering
+        elif batch_video_paths:
+            input_paths = [file.name for file in batch_video_paths]
+        
         if not input_paths:
-            return None, "⚠️ Batch Input tab is active, but no files were provided."
+            return None, "⚠️ Batch Input tab is active, but no files were provided. Please upload files or specify a valid folder path.", '<div style="padding: 12px; background: #f8d7da; border: 1px solid #f5c6cb; border-radius: 6px; color: #721c24;">❌ No input files</div>'
     elif active_tab_index == 0 and single_video_path:
         input_paths = [single_video_path]
     else:
-        return None, "⚠️ No input video found in the active tab. Please upload a video."
+        return None, "⚠️ No input video found in the active tab. Please upload a video.", '<div style="padding: 12px; background: #f8d7da; border: 1px solid #f5c6cb; border-radius: 6px; color: #721c24;">❌ No input video</div>'
 
     if not selected_ops:
         return None, "⚠️ No operations selected. Please check at least one box in 'Pipeline Steps'."
@@ -2534,6 +2539,12 @@ def create_ui():
                                     type="filepath",
                                     file_types=["video"],
                                     height="320px",                            
+                                )
+                                gr.Markdown("**Or** specify a folder path containing videos:")
+                                batch_folder_path = gr.Textbox(
+                                    placeholder="e.g., C:\\Users\\Videos\\batch",
+                                    label="Folder Path",
+                                    show_label=False
                                 )
                                 batch_run_button = gr.Button("Start Batch Processing", variant="primary", size="sm")
                         
@@ -2791,6 +2802,12 @@ def create_ui():
                                     file_types=["image"],
                                     height="320px",
                                 )
+                                gr.Markdown("**Or** specify a folder path containing images:")
+                                img_batch_folder_path = gr.Textbox(
+                                    placeholder="e.g., C:\\Users\\Pictures\\batch",
+                                    label="Folder Path",
+                                    show_label=False
+                                )
                                 img_batch_run_button = gr.Button("Start Batch Processing", variant="primary", size="sm")
                         
                         # Image Pre-Processing Accordion
@@ -3002,6 +3019,12 @@ def create_ui():
                                     type="filepath",
                                     file_types=["video"],
                                     height="300px",                            
+                                )
+                                gr.Markdown("**Or** specify a folder path containing videos:")
+                                tb_batch_folder_path = gr.Textbox(
+                                    placeholder="e.g., C:\\Users\\Videos\\batch",
+                                    label="Folder Path",
+                                    show_label=False
                                 )
                             tb_start_pipeline_btn = gr.Button("🚀 Start Pipeline Processing", variant="primary", size="sm")                              
                             with gr.Group():
@@ -3514,12 +3537,25 @@ def create_ui():
 
         # Batch processing handler
         def handle_batch_processing(
-            batch_files, mode, model_version, scale, color_fix, tiled_vae, tiled_dit, tile_size, tile_overlap,
+            batch_files, folder_path, mode, model_version, scale, color_fix, tiled_vae, tiled_dit, tile_size, tile_overlap,
             unload_dit, dtype_str, seed, device, fps_override, quality, attention_mode,
             sparse_ratio, kv_ratio, local_range
         ):
+            # Collect input paths from either files or folder
+            input_paths = []
+            if folder_path and os.path.isdir(folder_path):
+                video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.m4v']
+                input_paths = [str(f) for f in Path(folder_path).iterdir() 
+                              if f.is_file() and f.suffix.lower() in video_extensions]
+                input_paths.sort()  # Sort for consistent ordering
+            elif batch_files:
+                input_paths = [file.name for file in batch_files]
+            
+            if not input_paths:
+                return None, None, None, '<div style="padding: 1px; background-color: #f8d7da; border: 1px solid #f5c6cb; border-radius: 1px; color: #721c24;">❌ No videos found. Please upload files or specify a valid folder path.</div>'
+            
             last_video, status_msg = run_flashvsr_batch(
-                batch_files, mode, model_version, scale, color_fix, tiled_vae, tiled_dit, tile_size, tile_overlap,
+                input_paths, mode, model_version, scale, color_fix, tiled_vae, tiled_dit, tile_size, tile_overlap,
                 unload_dit, dtype_str, seed, device, fps_override, quality, attention_mode,
                 sparse_ratio, kv_ratio, local_range
             )
@@ -3542,7 +3578,7 @@ def create_ui():
         ).then(
             fn=handle_batch_processing,
             inputs=[
-                flashvsr_batch_input_files, mode_radio, model_version_radio, scale_slider, color_fix_checkbox, tiled_vae_checkbox,
+                flashvsr_batch_input_files, batch_folder_path, mode_radio, model_version_radio, scale_slider, color_fix_checkbox, tiled_vae_checkbox,
                 tiled_dit_checkbox, tile_size_slider, tile_overlap_slider, unload_dit_checkbox,
                 dtype_radio, seed_number, device_textbox, fps_number, quality_slider, attention_mode_radio,
                 sparse_ratio_slider, kv_ratio_slider, local_range_slider
@@ -3707,6 +3743,31 @@ def create_ui():
             show_progress="hidden"
         )
         
+        # Batch image handler wrapper
+        def handle_img_batch_processing(
+            batch_files, folder_path, mode, model_version, scale, color_fix, tiled_vae, tiled_dit, tile_size, tile_overlap,
+            unload_dit, dtype_str, seed, device, fps_override, quality, attention_mode,
+            sparse_ratio, kv_ratio, local_range, create_comparison
+        ):
+            # Collect input paths from either files or folder
+            input_paths = []
+            if folder_path and os.path.isdir(folder_path):
+                image_extensions = ['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tiff', '.tif']
+                input_paths = [str(f) for f in Path(folder_path).iterdir() 
+                              if f.is_file() and f.suffix.lower() in image_extensions]
+                input_paths.sort()  # Sort for consistent ordering
+            elif batch_files:
+                input_paths = [file.name for file in batch_files]
+            
+            if not input_paths:
+                return None, "❌ No images found. Please upload files or specify a valid folder path.", None
+            
+            return run_flashvsr_batch_image(
+                input_paths, mode, model_version, scale, color_fix, tiled_vae, tiled_dit, tile_size, tile_overlap,
+                unload_dit, dtype_str, seed, device, fps_override, quality, attention_mode,
+                sparse_ratio, kv_ratio, local_range, create_comparison
+            )
+        
         # Batch image run button click
         img_batch_run_button.click(
             fn=check_model_status,
@@ -3717,9 +3778,9 @@ def create_ui():
             inputs=[img_seed, img_randomize_seed],
             outputs=[img_seed]
         ).then(
-            fn=run_flashvsr_batch_image,
+            fn=handle_img_batch_processing,
             inputs=[
-                img_batch_input_files, img_mode, img_model_version, img_scale, img_color_fix,
+                img_batch_input_files, img_batch_folder_path, img_mode, img_model_version, img_scale, img_color_fix,
                 img_tiled_vae, img_tiled_dit, img_tile_size, img_tile_overlap,
                 img_unload_dit, img_dtype, img_seed, img_device, img_fps,
                 img_quality, img_attention_mode, img_sparse_ratio, img_kv_ratio,
@@ -3990,6 +4051,7 @@ def create_ui():
                 tb_active_tab_index,
                 tb_input_video,
                 tb_batch_input_files,
+                tb_batch_folder_path,
                 tb_pipeline_steps_chkbox,
                 # Frame Adjust params
                 process_fps_mode,
