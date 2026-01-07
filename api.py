@@ -8,10 +8,12 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from pathlib import Path
 
-# Import core logic functions from your webui.py
+# Import core logic and helper functions from your webui.py
 from webui import (
     run_flashvsr_single, 
     process_video_with_chunks, 
+    resize_input_video,      # Added for resizing
+    get_video_dimensions,    # Added to calculate half-width
     TEMP_DIR, 
     DEFAULT_OUTPUT_DIR,
     log
@@ -24,10 +26,10 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 os.makedirs(DEFAULT_OUTPUT_DIR, exist_ok=True)
 
 class UpscaleRequest(BaseModel):
-    # Input Source
     input_path: str = Field(..., description="Local file path or URL to video/image")
     
-    # Core Parameters
+    half_res_preprocess: bool = Field(False, description="Downscale input to 50% before processing")
+    
     mode: str = Field("tiny", pattern="^(tiny|full|tiny-long)$")
     model_version: str = Field("v1.1", pattern="^(v1.0|v1.1)$")
     scale: int = Field(2, ge=2, le=4)
@@ -59,9 +61,7 @@ class UpscaleRequest(BaseModel):
 def download_video(url: str) -> str:
     """Downloads a file from a URL and returns the local path."""
     try:
-        local_filename = f"download_{uuid.uuid4().hex[:8]}_{url.split('/')[-1]}"
-        # Strip query parameters if any
-        local_filename = local_filename.split('?')[0]
+        local_filename = f"download_{uuid.uuid4().hex[:8]}_{url.split('/')[-1]}".split('?')[0]
         if not (local_filename.lower().endswith(('.mp4', '.mov', '.avi', '.png', '.jpg', '.jpeg'))):
             local_filename += ".mp4"
             
@@ -91,11 +91,13 @@ def cleanup_files(paths: list):
 async def upscale_video(req: UpscaleRequest, background_tasks: BackgroundTasks):
     target_input = req.input_path
     downloaded = False
+    files_to_clean = []
 
     # 1. Handle URL Input
     if target_input.startswith(("http://", "https://")):
         target_input = download_video(target_input)
         downloaded = True
+        files_to_clean.append(target_input)
     
     if not os.path.exists(target_input):
         raise HTTPException(status_code=404, detail="Input file not found.")
@@ -108,83 +110,49 @@ async def upscale_video(req: UpscaleRequest, background_tasks: BackgroundTasks):
             return iterable
 
     try:
-        # 3. Route to either chunked or normal processing
+        # --- NEW LOGIC: PRE-PROCESS RESIZE ---
+        if req.half_res_preprocess:
+            width, _ = get_video_dimensions(target_input)
+            if width > 0:
+                half_width = int(width // 2)
+                log(f"Pre-processing: Resizing input to half-width ({half_width}px)", message_type="info")
+                resized_path = resize_input_video(target_input, half_width, progress=SimpleProgress())
+                if resized_path != target_input:
+                    target_input = resized_path
+                    files_to_clean.append(target_input) # Ensure temp resized file is cleaned
+
         if req.enable_chunks:
-            # Note: Comparison is disabled in chunked mode per webui.py logic
             result = process_video_with_chunks(
-                input_path=target_input,
-                chunk_duration=req.chunk_duration,
-                mode=req.mode,
-                model_version=req.model_version,
-                scale=req.scale,
-                color_fix=req.color_fix,
-                tiled_vae=req.tiled_vae,
-                tiled_dit=req.tiled_dit,
-                tile_size=req.tile_size,
-                tile_overlap=req.tile_overlap,
-                unload_dit=req.unload_dit,
-                dtype_str=req.dtype_str,
-                seed=req.seed,
-                device=req.device,
-                fps_override=req.fps_override,
-                quality=req.quality,
-                attention_mode=req.attention_mode,
-                sparse_ratio=req.sparse_ratio,
-                kv_ratio=req.kv_ratio,
-                local_range=req.local_range,
-                autosave=False, # We handle the response file manually
-                progress=SimpleProgress()
+                input_path=target_input, chunk_duration=req.chunk_duration, mode=req.mode,
+                model_version=req.model_version, scale=req.scale, color_fix=req.color_fix,
+                tiled_vae=req.tiled_vae, tiled_dit=req.tiled_dit, tile_size=req.tile_size,
+                tile_overlap=req.tile_overlap, unload_dit=req.unload_dit, dtype_str=req.dtype_str,
+                seed=req.seed, device=req.device, fps_override=req.fps_override,
+                quality=req.quality, attention_mode=req.attention_mode, sparse_ratio=req.sparse_ratio,
+                kv_ratio=req.kv_ratio, local_range=req.local_range, autosave=False, progress=SimpleProgress()
             )
         else:
             result = run_flashvsr_single(
-                input_path=target_input,
-                mode=req.mode,
-                model_version=req.model_version,
-                scale=req.scale,
-                color_fix=req.color_fix,
-                tiled_vae=req.tiled_vae,
-                tiled_dit=req.tiled_dit,
-                tile_size=req.tile_size,
-                tile_overlap=req.tile_overlap,
-                unload_dit=req.unload_dit,
-                dtype_str=req.dtype_str,
-                seed=req.seed,
-                device=req.device,
-                fps_override=req.fps_override,
-                quality=req.quality,
-                attention_mode=req.attention_mode,
-                sparse_ratio=req.sparse_ratio,
-                kv_ratio=req.kv_ratio,
-                local_range=req.local_range,
-                autosave=False,
-                create_comparison=req.create_comparison,
-                progress=SimpleProgress()
+                input_path=target_input, mode=req.mode, model_version=req.model_version,
+                scale=req.scale, color_fix=req.color_fix, tiled_vae=req.tiled_vae,
+                tiled_dit=req.tiled_dit, tile_size=req.tile_size, tile_overlap=req.tile_overlap,
+                unload_dit=req.unload_dit, dtype_str=req.dtype_str, seed=req.seed,
+                device=req.device, fps_override=req.fps_override, quality=req.quality,
+                attention_mode=req.attention_mode, sparse_ratio=req.sparse_ratio,
+                kv_ratio=req.kv_ratio, local_range=req.local_range, autosave=False,
+                create_comparison=req.create_comparison, progress=SimpleProgress()
             )
 
-        # Result structure from webui.py: (display_path, manual_save_path, slider_data, status_msg)
         output_path = result[1]
-
         if not output_path or not os.path.exists(output_path):
             raise HTTPException(status_code=500, detail="Processing failed to produce an output.")
 
-        # 4. Schedule cleanup of input if it was a URL download
-        files_to_clean = []
-        if downloaded:
-            files_to_clean.append(target_input)
-        
-        # We don't clean the output immediately as FileResponse needs it
-        # You might want a cron job to clean _temp periodically
         background_tasks.add_task(cleanup_files, files_to_clean)
-
-        return FileResponse(
-            path=output_path, 
-            media_type="video/mp4", 
-            filename=os.path.basename(output_path)
-        )
+        return FileResponse(path=output_path, media_type="video/mp4", filename=os.path.basename(output_path))
 
     except Exception as e:
         log(f"API Error: {str(e)}", message_type="error")
-        if downloaded: cleanup_files([target_input])
+        cleanup_files(files_to_clean)
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
