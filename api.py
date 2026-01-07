@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from pathlib import Path
+import time
 
 # Import core logic and helper functions from your webui.py
 from webui import (
@@ -109,6 +110,7 @@ async def upscale_video(req: UpscaleRequest, background_tasks: BackgroundTasks):
         def tqdm(self, iterable, *args, **kwargs):
             return iterable
 
+    a = time.time()
     try:
         # --- NEW LOGIC: PRE-PROCESS RESIZE ---
         if req.half_res_preprocess:
@@ -148,6 +150,9 @@ async def upscale_video(req: UpscaleRequest, background_tasks: BackgroundTasks):
             raise HTTPException(status_code=500, detail="Processing failed to produce an output.")
 
         background_tasks.add_task(cleanup_files, files_to_clean)
+
+        b = time.time()
+        log(f"Finished in {b-a:.2f} seconds", message_type="info")
         return FileResponse(path=output_path, media_type="video/mp4", filename=os.path.basename(output_path))
 
     except Exception as e:
