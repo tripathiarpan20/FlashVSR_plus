@@ -18,6 +18,10 @@ from webui import (
 )
 from storage_client import storage_client
 
+
+MAX_CONCURRENT_TASKS = 1  # Adjust based on your GPU memory/capacity
+CANCELLED_TASKS = set()
+
 app = FastAPI(title="FlashVSR+ Polling API")
 
 # Include API routes
@@ -71,15 +75,25 @@ class VideoStatusResponse(BaseModel):
 
 TASK_QUEUE = asyncio.Queue()
 TASKS = {} 
+SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
+
 
 async def queue_worker():
-    """Process tasks from the queue one by one."""
+    """Continuously pulls from queue and spawns limited concurrent workers."""
     while True:
         task_id, req = await TASK_QUEUE.get()
-        try:
-            await run_processing_task(task_id, req)
-        finally:
-            TASK_QUEUE.task_done()
+        # Create a background task for the actual processing so the worker can pull the next item
+        asyncio.create_task(run_task_with_semaphore(task_id, req))
+        TASK_QUEUE.task_done()
+
+async def run_task_with_semaphore(task_id: str, req: UpscalingSelectionRequest):
+    async with SEMAPHORE:
+        if task_id in CANCELLED_TASKS:
+            TASKS[task_id].update({"status": "cancelled", "message": "Task cancelled before starting"})
+            CANCELLED_TASKS.remove(task_id)
+            return
+            
+        await run_processing_task(task_id, req)
 
 @app.on_event("startup")
 async def startup_event():
@@ -213,7 +227,7 @@ async def run_processing_task(task_id: str, req: UpscalingSelectionRequest):
 @api_router.post("/videos/upload", response_model=VideoUploadResponse)
 async def upload_video(request: VideoUploadRequest, background_tasks: BackgroundTasks):
     task_id = str(uuid.uuid4())
-    TASKS[task_id] = {"status": "created", "message": "Task initialized", "position": None}
+    TASKS[task_id] = {"status": "created", "message": "Task initialized"}
     background_tasks.add_task(download_and_store, task_id, request.video_url)
     return {"task_id": task_id, "message": "Download initiated"}
 
@@ -221,11 +235,23 @@ async def upload_video(request: VideoUploadRequest, background_tasks: Background
 async def start_upscaling(task_id: str, request: UpscalingSelectionRequest):
     if task_id not in TASKS: raise HTTPException(status_code=404, detail="Task not found")
     if TASKS[task_id]["status"] != "downloaded":
-        raise HTTPException(status_code=400, detail=f"Video not ready. Current status: {TASKS[task_id]['status']}")
+        raise HTTPException(status_code=400, detail=f"Video not ready. Status: {TASKS[task_id]['status']}")
     
     TASKS[task_id].update({"status": "queued", "message": "Waiting in queue"})
     await TASK_QUEUE.put((task_id, request))
-    return {"status": "accepted", "message": "Added to processing queue", "queue_position": TASK_QUEUE.qsize()}
+    return {"status": "accepted", "message": "Added to queue"}
+
+@api_router.post("/videos/{task_id}/cancel")
+async def cancel_task(task_id: str):
+    if task_id not in TASKS: raise HTTPException(status_code=404, detail="Task not found")
+    
+    current_status = TASKS[task_id].get("status")
+    if current_status in ["completed", "failed", "cancelled"]:
+        return {"message": f"Task already in terminal state: {current_status}"}
+    
+    CANCELLED_TASKS.add(task_id)
+    TASKS[task_id].update({"status": "cancelled", "message": "User requested cancellation"})
+    return {"status": "success", "message": "Cancellation request received"}
 
 @api_router.get("/videos/{task_id}/status", response_model=VideoStatusResponse)
 async def get_status(task_id: str):
@@ -241,8 +267,9 @@ async def get_status(task_id: str):
 @api_router.get("/queue/status")
 async def get_queue_status():
     return {
-        "queue_size": TASK_QUEUE.qsize(),
-        "active_tasks": [tid for tid, t in TASKS.items() if t['status'] in ['processing', 'queued']]
+        "waiting_in_queue": TASK_QUEUE.qsize(),
+        "concurrency_limit": MAX_CONCURRENT_TASKS,
+        "active_processing": MAX_CONCURRENT_TASKS - SEMAPHORE._value
     }
 
 app.include_router(api_router, prefix="/api/v1")
