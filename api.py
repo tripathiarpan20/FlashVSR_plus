@@ -266,7 +266,7 @@ async def get_status(task_id: str):
         "task_id": task_id,
         "status": task.get("status"),
         "message": task.get("message", ""),
-        "output_url": task.get("output_url")
+        "output_url": task.get("output_url", "")
     }
 
 @api_router.get("/queue/status")
