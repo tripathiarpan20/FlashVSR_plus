@@ -2,41 +2,40 @@ import os
 import uuid
 import requests
 import uvicorn
-import torch
-from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
-from pathlib import Path
 import time
 import base64
-
-# Import core logic and helper functions from your webui.py
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from pydantic import BaseModel, Field
 from webui import (
     run_flashvsr_single, 
     process_video_with_chunks, 
-    resize_input_video,      # Added for resizing
-    get_video_dimensions,    # Added to calculate half-width
+    resize_input_video,      
+    get_video_dimensions,    
     TEMP_DIR, 
     DEFAULT_OUTPUT_DIR,
     log
 )
+from storage_client import storage_client
 
-app = FastAPI(title="FlashVSR+ API")
+app = FastAPI(title="FlashVSR+ Polling API")
 
 # Ensure directories exist
 os.makedirs(TEMP_DIR, exist_ok=True)
 os.makedirs(DEFAULT_OUTPUT_DIR, exist_ok=True)
 
-class UpscaleRequest(BaseModel):
-    input_path: str = Field(..., description="Local file path or URL to video/image")
-    
-    half_res_preprocess: bool = Field(False, description="Downscale input to 50% before processing")
-    
-    mode: str = Field("tiny", pattern="^(tiny|full|tiny-long)$")
-    model_version: str = Field("v1.1", pattern="^(v1.0|v1.1)$")
-    scale: int = Field(2, ge=2, le=4)
-    
-    # Performance/Memory Settings
+class VideoUploadRequest(BaseModel):
+    video_url: str
+
+class VideoUploadResponse(BaseModel):
+    task_id: str
+    message: str
+
+class UpscalingSelectionRequest(BaseModel):
+    # This inherits all your original UpscaleRequest parameters
+    half_res_preprocess: bool = False
+    mode: str = "tiny"
+    model_version: str = "v1.1"
+    scale: int = 2
     enable_chunks: bool = False
     chunk_duration: float = 5.0
     tiled_vae: bool = True
@@ -47,7 +46,7 @@ class UpscaleRequest(BaseModel):
     # Advanced Model Settings
     color_fix: bool = True
     unload_dit: bool = False
-    dtype_str: str = Field("bf16", pattern="^(fp16|bf16)$")
+    dtype_str: str = "bf16"
     seed: int = 0
     device: str = "auto"
     fps_override: int = 30
@@ -60,10 +59,19 @@ class UpscaleRequest(BaseModel):
     # Output Settings
     create_comparison: bool = False
 
-def download_video(url: str) -> str:
-    """Downloads a file from a URL and returns the local path."""
+class VideoStatusResponse(BaseModel):
+    task_id: str
+    status: str  # created, downloading, downloaded, processing, completed, failed
+    message: str
+    output_url: str = None
+
+TASKS = {} 
+
+
+def download_and_store(task_id: str, url: str):
     try:
-        local_filename = f"download_{uuid.uuid4().hex[:8]}_{url.split('/')[-1]}".split('?')[0]
+        TASKS[task_id]["status"] = "downloading"
+        local_filename = f"dl_{task_id}_{url.split('/')[-1]}".split('?')[0]
         if not (local_filename.lower().endswith(('.mp4', '.mov', '.avi', '.png', '.jpg', '.jpeg'))):
             local_filename += ".mp4"
             
@@ -75,104 +83,88 @@ def download_video(url: str) -> str:
             with open(path, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
-        return path
+        
+        TASKS[task_id].update({"status": "downloaded", "input_path": path})
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to download video from URL: {str(e)}")
+        TASKS[task_id].update({"status": "failed", "message": f"Download failed: {str(e)}"})
 
-def cleanup_files(paths: list):
-    """Removes temporary files after the request is finished."""
-    for path in paths:
-        if path and os.path.exists(path):
-            try:
-                os.remove(path)
-                log(f"Cleaned up: {path}")
-            except:
-                pass
-
-@app.post("/upscaling")
-async def upscale_video(req: UpscaleRequest, background_tasks: BackgroundTasks):
-    target_input = req.input_path
-    downloaded = False
-    files_to_clean = []
-
-    # 1. Handle URL Input
-    if target_input.startswith(("http://", "https://")):
-        target_input = download_video(target_input)
-        downloaded = True
-        files_to_clean.append(target_input)
+async def run_processing_task(task_id: str, req: UpscalingSelectionRequest):
+    task = TASKS.get(task_id)
+    target_input = task["input_path"]
+    files_to_clean = [target_input]
     
-    if not os.path.exists(target_input):
-        raise HTTPException(status_code=404, detail="Input file not found.")
-
-    # 2. Setup Progress Mock (FastAPI doesn't use Gradio's Progress)
     class SimpleProgress:
-        def __call__(self, val, desc=""):
-            log(f"[API Progress {val*100:.0f}%]: {desc}")
-        def tqdm(self, iterable, *args, **kwargs):
-            return iterable
+        def __call__(self, val, desc=""): TASKS[task_id]["message"] = f"{desc} ({val*100:.0f}%)"
+        def tqdm(self, iterable, *args, **kwargs): return iterable
 
     a = time.time()
     try:
-        # --- NEW LOGIC: PRE-PROCESS RESIZE ---
+        TASKS[task_id]["status"] = "processing"
+        
+        # Original Resizing Logic
         if req.half_res_preprocess:
             width, _ = get_video_dimensions(target_input)
             if width > 0:
-                half_width = int(width // 2)
-                log(f"Pre-processing: Resizing input to half-width ({half_width}px)", message_type="info")
-                resized_path = resize_input_video(target_input, half_width, progress=SimpleProgress())
+                resized_path = resize_input_video(target_input, int(width // 2), progress=SimpleProgress())
                 if resized_path != target_input:
                     target_input = resized_path
-                    files_to_clean.append(target_input) # Ensure temp resized file is cleaned
+                    files_to_clean.append(target_input)
 
+        # Original Processing Branching
         if req.enable_chunks:
-            result = process_video_with_chunks(
-                input_path=target_input, chunk_duration=req.chunk_duration, mode=req.mode,
-                model_version=req.model_version, scale=req.scale, color_fix=req.color_fix,
-                tiled_vae=req.tiled_vae, tiled_dit=req.tiled_dit, tile_size=req.tile_size,
-                tile_overlap=req.tile_overlap, unload_dit=req.unload_dit, dtype_str=req.dtype_str,
-                seed=req.seed, device=req.device, fps_override=req.fps_override,
-                quality=req.quality, attention_mode=req.attention_mode, sparse_ratio=req.sparse_ratio,
-                kv_ratio=req.kv_ratio, local_range=req.local_range, autosave=False, progress=SimpleProgress()
-            )
+            result = process_video_with_chunks(input_path=target_input, progress=SimpleProgress(), **req.dict(exclude={'half_res_preprocess'}))
         else:
-            result = run_flashvsr_single(
-                input_path=target_input, mode=req.mode, model_version=req.model_version,
-                scale=req.scale, color_fix=req.color_fix, tiled_vae=req.tiled_vae,
-                tiled_dit=req.tiled_dit, tile_size=req.tile_size, tile_overlap=req.tile_overlap,
-                unload_dit=req.unload_dit, dtype_str=req.dtype_str, seed=req.seed,
-                device=req.device, fps_override=req.fps_override, quality=req.quality,
-                attention_mode=req.attention_mode, sparse_ratio=req.sparse_ratio,
-                kv_ratio=req.kv_ratio, local_range=req.local_range, autosave=False,
-                create_comparison=req.create_comparison, progress=SimpleProgress()
-            )
+            result = run_flashvsr_single(input_path=target_input, progress=SimpleProgress(), **req.dict(exclude={'half_res_preprocess', 'chunk_duration', 'enable_chunks'}))
 
         output_path = result[1]
-        if not output_path or not os.path.exists(output_path):
-            raise HTTPException(status_code=500, detail="Processing failed to produce an output.")
-
-        background_tasks.add_task(cleanup_files, files_to_clean)
-
-        b = time.time()
-        log(f"Finished in {b-a:.2f} seconds", message_type="info")
-
-        with open(output_path, "rb") as video_file:
-            encoded_string = base64.b64encode(video_file.read()).decode('utf-8')
         
-        # Since we encoded it to a string, we can clean up the output file immediately
+        # Storage and Finalization
+        storage_key = f"{task_id}_out.mp4"
+        await storage_client.upload_file(storage_key, output_path)
+        presigned_url = await storage_client.get_presigned_url(storage_key)
+        
+        TASKS[task_id].update({
+            "status": "completed",
+            "output_url": presigned_url,
+            "message": "Processing finished successfully"
+        })
+        
+        # Cleanup
         files_to_clean.append(output_path)
-        background_tasks.add_task(cleanup_files, files_to_clean)
-        
-        return {
-            "status": "success",
-            "filename": os.path.basename(output_path),
-            "base64": encoded_string
-        }
-        # return FileResponse(path=output_path, media_type="video/mp4", filename=os.path.basename(output_path))
+        for p in files_to_clean:
+            if os.path.exists(p): os.remove(p)
 
     except Exception as e:
-        log(f"API Error: {str(e)}", message_type="error")
-        cleanup_files(files_to_clean)
-        raise HTTPException(status_code=500, detail=str(e))
+        TASKS[task_id].update({"status": "failed", "message": str(e)})
+
+# --- Routes ---
+
+@app.post("/videos/upload", response_model=VideoUploadResponse)
+async def upload_video(request: VideoUploadRequest, background_tasks: BackgroundTasks):
+    task_id = str(uuid.uuid4())
+    TASKS[task_id] = {"status": "created", "message": "Task initialized"}
+    background_tasks.add_task(download_and_store, task_id, request.video_url)
+    return {"task_id": task_id, "message": "Download initiated"}
+
+@app.post("/videos/{task_id}/upscaling")
+async def start_upscaling(task_id: str, request: UpscalingSelectionRequest, background_tasks: BackgroundTasks):
+    if task_id not in TASKS: raise HTTPException(status_code=404, detail="Task not found")
+    if TASKS[task_id]["status"] != "downloaded":
+        raise HTTPException(status_code=400, detail=f"Video not ready. Current status: {TASKS[task_id]['status']}")
+    
+    background_tasks.add_task(run_processing_task, task_id, request)
+    return {"status": "accepted", "message": "Processing started in background"}
+
+@app.get("/videos/{task_id}/status", response_model=VideoStatusResponse)
+async def get_status(task_id: str):
+    if task_id not in TASKS: raise HTTPException(status_code=404, detail="Task not found")
+    task = TASKS[task_id]
+    return {
+        "task_id": task_id,
+        "status": task.get("status"),
+        "message": task.get("message", ""),
+        "output_url": task.get("output_url")
+    }
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
