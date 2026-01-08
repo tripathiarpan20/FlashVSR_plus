@@ -121,14 +121,17 @@ class AmazonS3Client:
     def __init__(self, endpoint, access_key, secret_key, bucket_name, secure=True, region="eu-west-1"):
         self.endpoint = endpoint
         self.bucket_name = bucket_name
+        region_endpoint = f"https://s3.{region}.amazonaws.com"
+
         self.client = boto3.client(
             "s3",
             aws_access_key_id=access_key,
             aws_secret_access_key=secret_key,
             region_name=region,
+            endpoint_url=region_endpoint,
             config=BotoConfig(
                 signature_version="s3v4",
-                s3={"addressing_style": "virtual"}  # avoid path-style pitfalls
+                s3={"addressing_style": "virtual"}
             ),
         )
         self.executor = ThreadPoolExecutor()
