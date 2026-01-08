@@ -3,6 +3,7 @@ import uuid
 import requests
 import uvicorn
 import asyncio
+import functools
 import time
 import base64
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, FastAPI, Query
@@ -142,14 +143,17 @@ async def run_processing_task(task_id: str, req: UpscalingSelectionRequest):
         if req.half_res_preprocess:
             width, _ = get_video_dimensions(target_input)
             if width > 0:
-                resized_path = resize_input_video(target_input, int(width // 2), progress=SimpleProgress())
+                resized_path = await asyncio.to_thread(
+                    resize_input_video, target_input, int(width // 2), progress=SimpleProgress()
+                )
                 if resized_path != target_input:
                     target_input = resized_path
                     files_to_clean.append(target_input)
 
         # Original Processing Branching
         if req.enable_chunks:
-            result = process_video_with_chunks(
+            result = await asyncio.to_thread(
+                process_video_with_chunks,
                 input_path=target_input,
                 chunk_duration=req.chunk_duration,
                 mode=req.mode,
@@ -170,11 +174,12 @@ async def run_processing_task(task_id: str, req: UpscalingSelectionRequest):
                 sparse_ratio=req.sparse_ratio,
                 kv_ratio=req.kv_ratio,
                 local_range=req.local_range,
-                autosave=False, # We handle the response file manually
+                autosave=False,
                 progress=SimpleProgress()
             )
         else:
-            result = run_flashvsr_single(
+            result = await asyncio.to_thread(
+                run_flashvsr_single,
                 input_path=target_input,
                 mode=req.mode,
                 model_version=req.model_version,
