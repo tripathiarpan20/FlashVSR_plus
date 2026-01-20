@@ -707,12 +707,10 @@ class ToolboxProcessor:
                 else:
                     codec, params = 'libx264', ffmpeg_params
                 
-                # Override preset if needed
                 if 'nvenc' in codec:
-                    params.extend(['-preset', 'p4'])
+                    params.extend(['-preset', 'p4', '-qp', str(crf)]) # Uses crf as qp value for simplicity
                 else:
-                    params.extend(['-preset', 'medium'])
-                params.extend(['-crf', str(crf)])
+                    params.extend(['-preset', 'medium', '-crf', str(crf)])
 
                 writer = imageio.get_writer(
                     temp_video_path, 
@@ -788,12 +786,13 @@ class ToolboxProcessor:
                         codec, params = 'libx264', ffmpeg_params
 
                     if 'nvenc' in codec:
-                        params.extend(['-preset', 'p4'])
+                        params.extend(['-preset', 'p4', '-qp', str(crf)])
                     else:
-                        params.extend(['-preset', 'medium'])
-                    params.extend(['-crf', str(crf), '-loglevel', 'error'])
+                        params.extend(['-preset', 'medium', '-crf', str(crf)])
+                    
+                    params.extend(['-loglevel', 'error'])
 
-                    # Use ffmpeg_params with CRF for quality control
+                    # Use ffmpeg_params with quality control
                     imageio.mimwrite(
                         temp_video_path, 
                         processed_frames, 

@@ -8,15 +8,17 @@ def get_gpu_encoder():
     Detects the best available GPU encoder for FFmpeg.
     Returns encoder name and optional presets.
     """
-    # Force GPU detection via torch
-    if torch.cuda.is_available():
-        return "h264_nvenc"
-    elif torch.mps.is_available() or os.uname().sysname == 'Darwin':
-        return "h264_videotoolbox"
+    # # Force GPU detection via torch
+    # if torch.cuda.is_available():
+    #     return "h264_nvenc"
+    # elif torch.mps.is_available() or os.uname().sysname == 'Darwin':
+    #     return "h264_videotoolbox"
     
     # Check if ffmpeg has specific encoders
     try:
         encoders = subprocess.check_output(['ffmpeg', '-encoders'], stderr=subprocess.STDOUT).decode()
+        if 'hevc_nvenc' in encoders:
+            return 'hevc_nvenc'
         if 'h264_nvenc' in encoders:
             return 'h264_nvenc'
         if 'h264_videotoolbox' in encoders:
@@ -53,8 +55,8 @@ def get_imageio_settings(fps=30, quality=None, bitrate=None):
         # NVENC options vary by version, using safest ones
         if quality is not None:
             # Map 0-10 to 35-18
-            cq = 35 - int(quality * 1.7)
-            params.extend(["-cq", str(cq), "-preset", "p4"])
+            qp_val = 35 - int(quality * 1.7)
+            params.extend(["-qp", str(qp_val), "-preset", "p4"])
         elif bitrate:
             params.extend(["-b:v", bitrate])
     elif encoder == "h264_videotoolbox":

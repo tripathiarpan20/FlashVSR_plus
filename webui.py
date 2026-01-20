@@ -290,6 +290,8 @@ def save_video(frames, save_path, fps=30, quality=5, progress_desc="Saving video
         codec, params = ffmpeg_params
     else:
         codec, params = 'libx264', ffmpeg_params
+
+    codec = 'libx264'
         
     with imageio.get_writer(save_path, fps=fps, codec=codec, ffmpeg_params=params, macro_block_size=1) as writer:
         for i in tqdm(range(frames.shape[0]), desc=f"[FlashVSR] {progress_desc}"):
@@ -561,7 +563,7 @@ def create_side_by_side_comparison(input_path, output_path, comparison_output_pa
             ffmpeg_cmd.insert(-1, '-crf')
             ffmpeg_cmd.insert(-1, '18')
         elif gpu_encoder == 'h264_nvenc':
-            ffmpeg_cmd.insert(-1, '-cq')
+            ffmpeg_cmd.insert(-1, '-qp')
             ffmpeg_cmd.insert(-1, '18')
         
         result = subprocess.run(
