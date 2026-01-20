@@ -561,8 +561,6 @@ def create_side_by_side_comparison(input_path, output_path, comparison_output_pa
             ffmpeg_cmd.insert(-1, '-crf')
             ffmpeg_cmd.insert(-1, '18')
         elif gpu_encoder == 'h264_nvenc':
-            ffmpeg_cmd.insert(-1, '-rc')
-            ffmpeg_cmd.insert(-1, 'vbr')
             ffmpeg_cmd.insert(-1, '-cq')
             ffmpeg_cmd.insert(-1, '18')
         

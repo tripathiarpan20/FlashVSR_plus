@@ -818,8 +818,7 @@ class ToolboxProcessor:
                 hwaccel_args = get_gpu_decoder_args()
                 
                 mux_cmd = [
-                    self.ffmpeg_exe, "-y"
-                ] + hwaccel_args + [
+                    self.ffmpeg_exe, "-y",
                     "-i", str(temp_video_path),
                     "-i", video_path,
                     "-c:v", "copy"

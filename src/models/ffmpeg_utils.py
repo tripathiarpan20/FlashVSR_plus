@@ -46,24 +46,20 @@ def get_imageio_settings(fps=30, quality=None, bitrate=None):
     Returns (encoder, ffmpeg_params) for imageio.get_writer.
     """
     encoder = get_gpu_encoder()
-    params = []
-    
-    # Basic hardware acceleration
-    if torch.cuda.is_available():
-        params.extend(["-hwaccel", "cuda"])
-    elif torch.mps.is_available() or os.uname().sysname == 'Darwin':
-        params.extend(["-hwaccel", "videotoolbox"])
+    params = ["-v", "error"] # Reduce noise, helps with debugging broken pipes
     
     # Encoder specific tweaks
     if encoder == "h264_nvenc":
+        # NVENC options vary by version, using safest ones
         if quality is not None:
+            # Map 0-10 to 35-18
             cq = 35 - int(quality * 1.7)
-            # Use -rc:v to be more specific, and simplify options
             params.extend(["-cq", str(cq), "-preset", "p4"])
         elif bitrate:
             params.extend(["-b:v", bitrate])
     elif encoder == "h264_videotoolbox":
         if quality is not None:
+            # VideoToolbox quality is 0.0 to 1.0, some versions use -q:v 0-100
             q_val = quality / 10.0
             params.extend(["-q:v", str(int(q_val * 100))])
         elif bitrate:
