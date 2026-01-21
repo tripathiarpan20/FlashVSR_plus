@@ -33,8 +33,12 @@ from src.models.ffmpeg_utils import get_gpu_encoder, get_gpu_decoder_args, get_i
 from toolbox.system_monitor import SystemMonitor
 from toolbox.toolbox import ToolboxProcessor
 
+
+
 # Initialize toolbox_processor after load_config is defined
 toolbox_processor = None
+
+model_pipeline = None
 
 # Suppress annoyingly persistent Windows asyncio proactor errors
 if os.name == 'nt':  # Windows only
@@ -774,10 +778,12 @@ def run_flashvsr_single(
         "unload_dit": unload_dit, "fps": _fps, "tiled_dit": tiled_dit,
     }
 
+    if model_pipeline is None:
+            model_pipeline = init_pipeline(mode, _device, dtype, model_version=model_version)
+
     if tiled_dit:
         N, H, W, C = frames.shape
         progress(0.1, desc="Initializing model pipeline...")
-        pipe = init_pipeline(mode, _device, dtype, model_version=model_version)
         tile_coords = calculate_tile_coords(H, W, tile_size, tile_overlap)
         num_tiles = len(tile_coords)
 
@@ -794,7 +800,7 @@ def run_flashvsr_single(
                 temp_name = os.path.join(local_temp_dir, f"{i+1:05d}.mp4")
                 th, tw, F = get_input_params(input_tile, scale)
                 LQ_tile = input_tensor_generator(input_tile, _device, scale=scale, dtype=dtype)
-                pipe(
+                model_pipeline(
                     LQ_video=LQ_tile, num_frames=F, height=th, width=tw,
                     topk_ratio=sparse_ratio*768*1280/(th*tw),
                     quality=10, output_path=temp_name, **pipe_kwargs
@@ -825,7 +831,7 @@ def run_flashvsr_single(
                 
                 LQ_tile, th, tw, F = prepare_input_tensor(input_tile, _device, scale=scale, dtype=dtype)
                 LQ_tile = LQ_tile.to(_device)
-                output_tile_gpu = pipe(
+                output_tile_gpu = model_pipeline(
                     LQ_video=LQ_tile, num_frames=F, height=th, width=tw,
                     topk_ratio=sparse_ratio*768*1280/(th*tw), **pipe_kwargs
                 )
@@ -898,7 +904,6 @@ def run_flashvsr_single(
             clean_vram()
     else: # Non-tiled mode
         progress(0.1, desc="Initializing model pipeline...")
-        pipe = init_pipeline(mode, _device, dtype, model_version=model_version)
         log(f"Processing {frames.shape[0]} frames...", message_type='info')
 
         N, H, W, C = frames.shape
@@ -906,7 +911,7 @@ def run_flashvsr_single(
         if mode == "tiny-long":
             progress(0.2, desc="Processing video...")
             LQ = input_tensor_generator(frames, _device, scale=scale, dtype=dtype)
-            pipe(
+            model_pipeline(
                 LQ_video=LQ, num_frames=F, height=th, width=tw,
                 topk_ratio=sparse_ratio*768*1280/(th*tw),
                 output_path=temp_video_path, quality=quality, **pipe_kwargs
@@ -916,7 +921,7 @@ def run_flashvsr_single(
             LQ, _, _, _ = prepare_input_tensor(frames, _device, scale=scale, dtype=dtype)
             LQ = LQ.to(_device)
             progress(0.3, desc="Running model inference...")
-            video = pipe(
+            video = model_pipeline(
                 LQ_video=LQ, num_frames=F, height=th, width=tw,
                 topk_ratio=sparse_ratio*768*1280/(th*tw), **pipe_kwargs
             )
@@ -938,7 +943,7 @@ def run_flashvsr_single(
                 log(f"Cropped padding: {output_h}x{output_w} → {target_h}x{target_w}", message_type='info')
             
             del video  # Free the original video tensor
-        del pipe; clean_vram()
+        clean_vram()
 
     if final_output_tensor is not None:
         progress(0.9, desc="Saving final video...")
