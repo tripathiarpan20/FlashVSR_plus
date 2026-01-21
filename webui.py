@@ -943,7 +943,12 @@ def run_flashvsr_single(
     progress(0, desc="Loading video frames...")
     log(f"Loading frames from {input_path}...", message_type='info')
     # frames, original_fps = prepare_tensors(input_path, dtype=dtype)
+
+    a = time.time()
     frames, original_fps = prepare_tensors_gpu(input_path, dtype=dtype, device=_device)
+    b = time.time()
+    log(f"Video frames loaded in {b-a:.2f} seconds.", message_type='info')
+
     _fps = original_fps if is_video(input_path) else fps_override
     if frames.shape[0] < 21: raise gr.Error(f"Input must have at least 21 frames, but got {frames.shape[0]} frames.")
     log("Video frames loaded successfully.", message_type="finish")
