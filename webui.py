@@ -2413,11 +2413,21 @@ def create_video_chunks(video_path, start_time, end_time, chunk_duration, progre
         dur = chunk_end - current_pos
         output_filename = f"chunk_{len(chunk_paths)}_{uuid.uuid4().hex[:6]}.mp4"
         output_path = os.path.join(TEMP_DIR, output_filename)
-        
-        ffmpeg_cmd = [
-            'ffmpeg', '-y', '-ss', str(current_pos), '-i', video_path,
-            '-t', str(dur), '-c:v', 'libx264', '-crf', '17', '-pix_fmt', 'yuv420p', output_path
-        ]
+
+        if chunk_end >= end_time and current_pos == start_time:
+            log(f"📋 Single chunk detected, using stream copy (no re-encoding)")
+            ffmpeg_cmd = [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-i", video_path,
+                "-c:v", "copy",
+                "-c:a", "copy",
+                output_path
+            ]
+        else:
+            ffmpeg_cmd = [
+                'ffmpeg', '-y', '-ss', str(current_pos), '-i', video_path,
+                '-t', str(dur), '-c:v', 'libx264', '-crf', '17', '-pix_fmt', 'yuv420p', output_path
+            ]
         
         subprocess.run(ffmpeg_cmd, capture_output=True, check=True)
         chunk_paths.append(output_path)
