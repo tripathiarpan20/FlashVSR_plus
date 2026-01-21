@@ -1,6 +1,7 @@
 # Core UI
 gradio>=5.49.0,<6.0.0
 gradio-videoslider
+decord==0.6.0
 
 # Core dependencies
 numpy>=2.2.0,<3.0.0

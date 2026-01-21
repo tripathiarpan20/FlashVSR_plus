@@ -32,12 +32,19 @@ from src.models.ffmpeg_utils import get_gpu_encoder, get_gpu_decoder_args, get_i
 
 from toolbox.system_monitor import SystemMonitor
 from toolbox.toolbox import ToolboxProcessor
+from concurrent.futures import ThreadPoolExecutor
 
+# Try importing decord, handle if missing
+try:
+    from decord import VideoReader, cpu
+    DECORD_AVAILABLE = True
+except ImportError:
+    DECORD_AVAILABLE = False
+    
 
 
 # Initialize toolbox_processor after load_config is defined
 toolbox_processor = None
-
 model_pipeline = None
 
 # Suppress annoyingly persistent Windows asyncio proactor errors
@@ -354,6 +361,72 @@ def save_video_nvenc(frames, save_path, fps=30, quality=5, progress_desc="Saving
     finally:
         process.stdin.close()
         process.wait()
+
+
+def prepare_tensors_gpu(path: str, dtype=torch.bfloat16, device='cpu'):
+    """
+    Loads images or video into a (T, H, W, C) tensor.
+    Optimized for speed by keeping data in uint8 until the last moment.
+    """
+    
+    # --- Case 1: Directory of Images ---
+    if os.path.isdir(path):
+        paths = list_images_natural(path) # Assuming this function exists as per your snippet
+        if not paths: raise FileNotFoundError(f"No images in {path}")
+        
+        # Define a worker to load a single image as uint8 numpy array
+        def load_img(p):
+            return np.array(Image.open(p).convert('RGB'))
+
+        # Use ThreadPool to load images in parallel (IO-bound)
+        # Adjust max_workers based on your CPU
+        with ThreadPoolExecutor() as executor:
+            frames_np = list(tqdm(executor.map(load_img, paths), total=len(paths), desc="Loading images"))
+
+        # Stack numpy arrays (fast) -> Convert to Tensor -> Normalize
+        # We stack as uint8 first to save memory bandwidth
+        tensor = torch.from_numpy(np.stack(frames_np))
+        
+        # Move to device and cast ONLY ONCE. 
+        # Doing the division on GPU is significantly faster.
+        tensor = tensor.to(device=device, dtype=dtype) / 255.0
+        
+        return tensor, 30
+
+    # --- Case 2: Video File ---
+    # FASTEST OPTION: Decord
+    if DECORD_AVAILABLE:
+        # Load video context on CPU (decord handles decoding very fast)
+        vr = VideoReader(path, ctx=cpu(0))
+        fps = vr.get_avg_fps()
+        
+        # Get all frames in one go as a numpy array (T, H, W, C)
+        # This bypasses the Python loop entirely
+        video_data = vr.get_batch(range(len(vr))).asnumpy()
+        
+        tensor = torch.from_numpy(video_data)
+        tensor = tensor.to(device=device, dtype=dtype) / 255.0
+        
+        return tensor, fps
+
+    # FALLBACK OPTION: ImageIO (Optimized)
+    # Only runs if decord is not installed
+    elif is_video(path): # Assuming is_video exists
+        print("Warning: 'decord' not found. Using 'imageio' (slower). Install decord for speed.")
+        reader = imageio.get_reader(path)
+        meta = reader.get_meta_data()
+        fps = meta.get('fps', 30)
+        
+        # Load all frames as uint8 first
+        frames_np = [np.asarray(frame) for frame in tqdm(reader, desc="Loading video")]
+        reader.close()
+        
+        tensor = torch.from_numpy(np.stack(frames_np))
+        tensor = tensor.to(device=device, dtype=dtype) / 255.0
+        
+        return tensor, fps
+
+    raise ValueError(f"Unsupported input: {path}")
 
 
 def prepare_tensors(path: str, dtype=torch.bfloat16):
@@ -790,6 +863,7 @@ def run_flashvsr_single(
     create_comparison=False,
     progress=gr.Progress(track_tqdm=True)
 ):
+    global model_pipeline
     if not input_path:
         log("No input video provided.", message_type='warning')
         return None, None, None
@@ -817,7 +891,8 @@ def run_flashvsr_single(
     # --- Core Logic ---
     progress(0, desc="Loading video frames...")
     log(f"Loading frames from {input_path}...", message_type='info')
-    frames, original_fps = prepare_tensors(input_path, dtype=dtype)
+    # frames, original_fps = prepare_tensors(input_path, dtype=dtype)
+    frames, original_fps = prepare_tensors_gpu(input_path, dtype=dtype, device=_device)
     _fps = original_fps if is_video(input_path) else fps_override
     if frames.shape[0] < 21: raise gr.Error(f"Input must have at least 21 frames, but got {frames.shape[0]} frames.")
     log("Video frames loaded successfully.", message_type="finish")
@@ -831,9 +906,9 @@ def run_flashvsr_single(
         "kv_ratio": kv_ratio, "local_range": local_range, "color_fix": color_fix,
         "unload_dit": unload_dit, "fps": _fps, "tiled_dit": tiled_dit,
     }
-
-    if model_pipeline is None:
-            model_pipeline = init_pipeline(mode, _device, dtype, model_version=model_version)
+    
+    if not model_pipeline :
+        model_pipeline = init_pipeline(mode, _device, dtype, model_version=model_version)
 
     if tiled_dit:
         N, H, W, C = frames.shape
