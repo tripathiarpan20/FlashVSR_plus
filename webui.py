@@ -287,20 +287,74 @@ def is_video(path):
 def is_ffmpeg_available():
     return shutil.which("ffmpeg") is not None
 
-def save_video(frames, save_path, fps=30, quality=5, progress_desc="Saving video..."):
+def save_video_nvenc(frames, save_path, fps=30, quality=5, progress_desc="Saving video..."):
+    """
+    Saves video using system FFmpeg with NVENC hardware acceleration.
+    
+    Args:
+        frames (torch.Tensor): Tensor of shape (T, C, H, W) or (T, H, W, C)
+                               Assumed to be normalized [0, 1] or [0, 255].
+    """
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     ffmpeg_params = get_imageio_settings(fps=fps, quality=quality)
-    if isinstance(ffmpeg_params, tuple):
-        codec, params = ffmpeg_params
-    else:
-        codec, params = 'libx264', ffmpeg_params
-
-    codec = 'libx264'
+    codec, params = ffmpeg_params
+    
+    # 1. Detect dimensions and ensure (T, H, W, C) layout
+    if frames.ndim == 5: # (B, T, C, H, W) -> squeeze batch
+        frames = frames.squeeze(0)
+    
+    # If shape is (T, C, H, W), permute to (T, H, W, C)
+    if frames.shape[1] == 3: 
+        frames = frames.permute(0, 2, 3, 1)
         
-    with imageio.get_writer(save_path, fps=fps, codec=codec, ffmpeg_params=params, macro_block_size=1) as writer:
-        for i in tqdm(range(frames.shape[0]), desc=f"[FlashVSR] {progress_desc}"):
-            frame_np = (frames[i].cpu().float() * 255.0).clip(0, 255).numpy().astype(np.uint8)
-            writer.append_data(frame_np)
+    t, h, w, c = frames.shape
+
+    # 2. FFmpeg command for NVENC (Hardware Acceleration)
+    # -f rawvideo: input format
+    # -pix_fmt rgb24: input pixel format (from torch)
+    # -c:v hevc_nvenc: NVIDIA HEVC encoder
+    # -preset p4: Performance preset (p1=fastest, p7=slowest/best quality)
+    cmd = [
+        'ffmpeg',
+        '-y', # Overwrite output
+        '-f', 'rawvideo',
+        '-vcodec', 'rawvideo',
+        '-s', f'{w}x{h}', # Size
+        '-pix_fmt', 'rgb24',
+        '-r', str(fps),
+        '-i', '-', # Input from stdin
+        '-c:v', codec, # The Hardware Encoder
+        '-pix_fmt', 'yuv420p', # Required for compatibility with most players
+        '-preset', 'p4', # p1 to p7 (p4 is medium)
+        '-cq', '20', # Constant Quality (lower is better, 0-51)
+        '-loglevel', 'error',
+        save_path
+    ]
+
+    # 3. Open Subprocess
+    process = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+
+    try:
+        for i in tqdm(range(t), desc=f"[FlashVSR] {progress_desc}"):
+            # 4. GPU OPTIMIZATION: Convert to uint8 ON THE GPU
+            # Moving uint8 to CPU is 4x faster than moving float32
+            frame = frames[i]
+            
+            # Check if normalized [0, 1] or [0, 255]
+            if frame.max() <= 1.05:
+                frame = frame.mul(255).add_(0.5).clamp_(0, 255).to(dtype=torch.uint8)
+            else:
+                frame = frame.add_(0.5).clamp_(0, 255).to(dtype=torch.uint8)
+            
+            # Move to CPU and write bytes
+            process.stdin.write(frame.cpu().numpy().tobytes())
+            
+    except BrokenPipeError:
+        print("Error: FFmpeg pipe broke. Check if FFmpeg is installed and supports hevc_nvenc.")
+    finally:
+        process.stdin.close()
+        process.wait()
+
 
 def prepare_tensors(path: str, dtype=torch.bfloat16):
     if os.path.isdir(path):
@@ -953,7 +1007,7 @@ def run_flashvsr_single(
         torch.cuda.empty_cache()
         import gc
         gc.collect()
-        save_video(final_output_tensor, temp_video_path, fps=_fps, quality=quality)
+        save_video_nvenc(final_output_tensor, temp_video_path, fps=_fps, quality=quality)
 
     # Always save to temp directory first (persists during session)
     temp_output_path = os.path.join(TEMP_DIR, output_filename)
