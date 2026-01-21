@@ -1020,6 +1020,7 @@ def run_flashvsr_single(
                     LQ_video=LQ_tile, num_frames=F, height=th, width=tw,
                     topk_ratio=sparse_ratio*768*1280/(th*tw), **pipe_kwargs
                 )
+                clean_vram()
                 processed_tile_cpu = tensor2video(output_tile_gpu).cpu()
                 # Trim to match input frame count if model output more frames
                 processed_tile_cpu = processed_tile_cpu[:num_aligned_frames]
@@ -1110,6 +1111,7 @@ def run_flashvsr_single(
                 LQ_video=LQ, num_frames=F, height=th, width=tw,
                 topk_ratio=sparse_ratio*768*1280/(th*tw), **pipe_kwargs
             )
+            clean_vram()
             progress(0.8, desc="Converting output...")
             final_output_tensor = tensor2video(video).cpu()
             # Trim to match input frame count
