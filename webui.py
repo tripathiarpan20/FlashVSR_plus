@@ -362,6 +362,57 @@ def save_video_nvenc(frames, save_path, fps=30, quality=5, progress_desc="Saving
         process.stdin.close()
         process.wait()
 
+def save_video_cpu(frames, save_path, fps=30, progress_desc="Saving video..."):
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    
+    # 1. Detect dimensions
+    if frames.ndim == 5: 
+        frames = frames.squeeze(0)
+    if frames.shape[1] == 3: 
+        frames = frames.permute(0, 2, 3, 1)
+        
+    t, h, w, c = frames.shape
+
+    # 2. FFmpeg command for CPU Encoding (libx264)
+    # -preset ultrafast: Trades compression efficiency for speed (critical for CPU)
+    # -crf 23: Standard quality (lower is better, 0-51)
+    # -threads 0: Use all available CPU cores
+    cmd = [
+        'ffmpeg',
+        '-y', 
+        '-f', 'rawvideo',
+        '-vcodec', 'rawvideo',
+        '-s', f'{w}x{h}', 
+        '-pix_fmt', 'rgb24',
+        '-r', str(fps),
+        '-i', '-', 
+        '-c:v', 'libx264',   # <--- Standard CPU Encoder
+        '-pix_fmt', 'yuv420p', 
+        '-preset', 'ultrafast', # <--- KEY for speed
+        '-crf', '23',        
+        '-threads', '0',     # <--- Use all cores
+        '-loglevel', 'error',
+        save_path
+    ]
+
+    process = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+
+    try:
+        for i in tqdm(range(t), desc=f"[FlashVSR] {progress_desc}"):
+            # Optimize conversion (GPU -> CPU uint8)
+            frame = frames[i]
+            if frame.max() <= 1.05:
+                frame = frame.mul(255).add_(0.5).clamp_(0, 255).to(dtype=torch.uint8)
+            else:
+                frame = frame.add_(0.5).clamp_(0, 255).to(dtype=torch.uint8)
+            
+            process.stdin.write(frame.cpu().numpy().tobytes())
+            
+    except BrokenPipeError:
+        print("Error: FFmpeg pipe broke.")
+    finally:
+        process.stdin.close()
+        process.wait()
 
 def prepare_tensors_gpu(path: str, dtype=torch.bfloat16, device='cpu'):
     """
@@ -1082,7 +1133,8 @@ def run_flashvsr_single(
         torch.cuda.empty_cache()
         import gc
         gc.collect()
-        save_video_nvenc(final_output_tensor, temp_video_path, fps=_fps, quality=quality)
+        #save_video_nvenc
+        save_video_cpu(final_output_tensor, temp_video_path, fps=_fps, quality=quality)
 
     # Always save to temp directory first (persists during session)
     temp_output_path = os.path.join(TEMP_DIR, output_filename)
