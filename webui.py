@@ -1139,7 +1139,7 @@ def run_flashvsr_single(
         import gc
         gc.collect()
         #save_video_nvenc
-        save_video_cpu(final_output_tensor, temp_video_path, fps=_fps, quality=quality)
+        save_video_cpu(final_output_tensor, temp_video_path, fps=_fps)
 
     # Always save to temp directory first (persists during session)
     temp_output_path = os.path.join(TEMP_DIR, output_filename)
